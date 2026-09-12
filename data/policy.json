@@ -1,0 +1,9 @@
+{
+  "maxAnnualBudget": 60000,
+  "maxSingleVendorSpend": 15000,
+  "renewalWindowDays": 30,
+  "unusedSeatThresholdPct": 0.5,
+  "blacklist": ["competitor-x"],
+  "cancellationWindowDays": 30,
+  "categories": []
+}

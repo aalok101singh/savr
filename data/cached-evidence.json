@@ -1,0 +1,120 @@
+{
+  "Productivity#notion": [
+    {
+      "id": "ev-benchmark-notion-1",
+      "type": "price_benchmark",
+      "source": "g2_reports",
+      "url": "https://www.g2.com/products/notion/reviews",
+      "publisher": "G2",
+      "retrievedAt": "2026-09-05T12:00:00-07:00",
+      "freshUntil": "2026-09-12T12:00:00-07:00",
+      "observedValue": "Notion Business $120-$200/user/yr",
+      "confidence": 0.8,
+      "isInternal": false,
+      "summary": "G2 benchmark: Notion Business runs $120-$200 per user per year, far below Acme's $600/seat.",
+      "data": { "minPricePerSeat": 120, "maxPricePerSeat": 200, "currency": "USD", "vendorId": "notion" }
+    },
+    {
+      "id": "ev-benchmark-notion-2",
+      "type": "price_benchmark",
+      "source": "vendor_pricing",
+      "url": "https://www.notion.so/pricing",
+      "publisher": "Notion",
+      "retrievedAt": "2026-09-05T12:00:00-07:00",
+      "freshUntil": "2026-09-12T12:00:00-07:00",
+      "observedValue": "Notion Business $20/seat/mo (annual)",
+      "confidence": 0.95,
+      "isInternal": false,
+      "summary": "Notion lists Business at $20/seat/mo billed annually ($240/yr). Enterprise likely above.",
+      "data": { "pricePerSeatMonthly": 20, "billing": "annual", "currency": "USD", "vendorId": "notion" }
+    },
+    {
+      "id": "ev-alt-notion-1",
+      "type": "alternative_found",
+      "source": "g2_alternatives",
+      "url": "https://www.g2.com/categories/project-management",
+      "publisher": "G2",
+      "retrievedAt": "2026-09-05T12:00:00-07:00",
+      "freshUntil": "2026-09-12T12:00:00-07:00",
+      "observedValue": "Coda $120/seat/yr",
+      "confidence": 0.75,
+      "isInternal": false,
+      "summary": "Coda positions as a Notion alternative at ~$120/seat/yr for business plans.",
+      "data": { "vendorId": "coda", "annualCost": 120, "currency": "USD" }
+    }
+  ],
+  "Video#loom": [
+    {
+      "id": "ev-benchmark-loom-1",
+      "type": "price_benchmark",
+      "source": "vendor_pricing",
+      "url": "https://www.loom.com/pricing",
+      "publisher": "Loom",
+      "retrievedAt": "2026-09-05T12:00:00-07:00",
+      "freshUntil": "2026-09-12T12:00:00-07:00",
+      "observedValue": "Loom Business $25/seat/mo (annual)",
+      "confidence": 0.9,
+      "isInternal": false,
+      "summary": "Loom Business is ~$25/seat/mo annual; Acme pays $300/seat/yr.",
+      "data": { "pricePerSeatMonthly": 25, "billing": "annual", "currency": "USD", "vendorId": "loom" }
+    },
+    {
+      "id": "ev-alt-loom-1",
+      "type": "alternative_found",
+      "source": "internal_stack",
+      "url": null,
+      "publisher": "Acme Corp",
+      "retrievedAt": "2026-09-05T12:00:00-07:00",
+      "freshUntil": "2026-09-12T12:00:00-07:00",
+      "observedValue": "Veed already subscribed",
+      "confidence": 1,
+      "isInternal": true,
+      "summary": "Acme already subscribes to Veed (Video). Consolidating onto Veed removes Loom's full cost.",
+      "data": { "vendorId": "veed", "annualCost": 2400, "alreadyActive": true, "currency": "USD" }
+    },
+    {
+      "id": "ev-alt-loom-2",
+      "type": "alternative_found",
+      "source": "g2_alternatives",
+      "url": "https://www.g2.com/categories/video-editing",
+      "publisher": "G2",
+      "retrievedAt": "2026-09-05T12:00:00-07:00",
+      "freshUntil": "2026-09-12T12:00:00-07:00",
+      "observedValue": "Descript ~$288/seat/yr",
+      "confidence": 0.7,
+      "isInternal": false,
+      "summary": "Descript offers screen+overlay recording at ~$288/seat/yr as a Loom alternative.",
+      "data": { "vendorId": "descript", "annualCost": 288, "currency": "USD" }
+    }
+  ],
+  "Analytics#posthog": [
+    {
+      "id": "ev-benchmark-posthog-1",
+      "type": "price_benchmark",
+      "source": "vendor_pricing",
+      "url": "https://posthog.com/pricing",
+      "publisher": "PostHog",
+      "retrievedAt": "2026-09-05T12:00:00-07:00",
+      "freshUntil": "2026-09-12T12:00:00-07:00",
+      "observedValue": "PostHog paid plans from $240/user/yr",
+      "confidence": 0.9,
+      "isInternal": false,
+      "summary": "PostHog's published paid tier starts around Acme's current $240/seat/yr rate.",
+      "data": { "minPricePerSeat": 240, "currency": "USD", "vendorId": "posthog" }
+    },
+    {
+      "id": "ev-benchmark-posthog-2",
+      "type": "price_benchmark",
+      "source": "g2_reports",
+      "url": "https://www.g2.com/products/posthog/reviews",
+      "publisher": "G2",
+      "retrievedAt": "2026-09-05T12:00:00-07:00",
+      "freshUntil": "2026-09-12T12:00:00-07:00",
+      "observedValue": "PostHog average contract $2,800/yr",
+      "confidence": 0.75,
+      "isInternal": false,
+      "summary": "G2-reported average PostHog contracts hover near Acme's $2,400/yr spend.",
+      "data": { "averageAnnual": 2800, "currency": "USD", "vendorId": "posthog" }
+    }
+  ]
+}
