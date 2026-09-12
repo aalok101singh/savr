@@ -1,0 +1,38 @@
+{
+  "name": "savr",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Savr — autonomous procurement employee for companies without a procurement team",
+  "type": "module",
+"scripts": {
+    "typecheck": "tsc --noEmit",
+    "validate:data": "tsx src/scripts/validate-data.ts",
+    "validate:agent": "tsx src/scripts/validate-agent.ts",
+    "validate:sandbox": "tsx src/scripts/validate-sandbox.ts",
+    "validate:l4": "tsx src/scripts/validate-l4.ts",
+    "validate:l4.5": "tsx src/scripts/validate-l4.5.ts",
+    "validate:autopilot": "tsx src/scripts/validate-autopilot.ts",
+    "validate:web-evidence": "tsx src/scripts/validate-web-evidence.ts",
+    "guardian": "tsx src/agent/guardian.ts",
+    "sandbox": "tsx src/sandbox/server.ts",
+    "negotiate": "tsx src/agent/negotiator.ts",
+    "dev": "tsx src/api/server.ts",
+    "dev:ui": "npm --prefix ui run dev",
+    "build:ui": "npm --prefix ui run build",
+    "ui:check-rows": "tsx --tsconfig ui/tsconfig.json ui/scripts/check-rows.tsx",
+    "ui:check-story": "tsx --tsconfig ui/tsconfig.json ui/scripts/check-story.ts",
+    "demo:run": "tsx src/scripts/demo-run.ts",
+    "demo:reset": "tsx src/scripts/demo-reset.ts",
+    "demo:test": "tsx src/scripts/demo-test.ts"
+  },
+  "dependencies": {
+    "@strands-agents/sdk": "1.14.0",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "tsx": "^4.19.0",
+    "@types/node": "^22.0.0",
+    "@types/express": "^5.0.0"
+  }
+}
