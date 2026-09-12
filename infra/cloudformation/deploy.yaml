@@ -1,0 +1,217 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Savr — autonomous procurement agent (ECS Fargate, ALB, Bedrock). Long-lived service: Express API + built React SPA + optional in-process Guardian loop (AUTOPILOT_ENABLED). Least-privilege IAM: the task role can only invoke the pinned Bedrock model.
+
+Parameters:
+  ImageUri:
+    Type: String
+    Description: ECR image URI, e.g. 003678938023.dkr.ecr.us-east-1.amazonaws.com/savr:latest
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to deploy into (the default VPC works).
+  SubnetA:
+    Type: AWS::EC2::Subnet::Id
+  SubnetB:
+    Type: AWS::EC2::Subnet::Id
+  ApiTokenSecretArn:
+    Type: String
+    Description: SecretsManager secret holding JSON {"API_TOKEN":"<value>"} for the request gate. Create with: aws secretsmanager create-secret --name savr/api-token --secret-string '{"API_TOKEN":"<generate>"}'
+  DemoMode:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: true = deterministic offline demo (LocalModel); false = real Bedrock calls.
+  AutopilotEnabled:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: true = Guardian re-runs on its own every AUTOPILOT_INTERVAL_MS (default 120s). Off by default so no unsolicited Bedrock calls.
+  BedrockRegion:
+    Type: String
+    Default: us-east-1
+  NinerouterUrl:
+    Type: String
+    Default: ""
+    Description: Optional 9Router-compatible URL for live web evidence enrichment.
+
+Resources:
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/savr
+      RetentionInDays: 7
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: savr-task-bedrock
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub arn:aws:bedrock:${BedrockRegion}::foundation-model/anthropic.claude-sonnet-4-6
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: savr-execution
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt LogGroup.Arn
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref ApiTokenSecretArn
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP from the ALB to the Savr container
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow public HTTP to the ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: savr
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      Cpu: "512"
+      Memory: "1024"
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: savr
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 3000
+              Protocol: tcp
+          Environment:
+            - Name: HOST
+              Value: 0.0.0.0
+            - Name: API_PORT
+              Value: "3000"
+            - Name: AWS_REGION
+              Value: !Ref BedrockRegion
+            - Name: DEMO_MODE
+              Value: !Ref DemoMode
+            - Name: AUTOPILOT_ENABLED
+              Value: !Ref AutopilotEnabled
+            - Name: DEBUG_MODE
+              Value: "false"
+            - Name: NINEROUTER_URL
+              Value: !Ref NinerouterUrl
+          Secrets:
+            - Name: API_TOKEN
+              ValueFrom: !Sub "${ApiTokenSecretArn}:API_TOKEN"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref BedrockRegion
+              awslogs-stream-prefix: savr
+              awslogs-create-group: "true"
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Port: 3000
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      UnhealthyThresholdCount: 3
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets: [!Ref SubnetA, !Ref SubnetB]
+      SecurityGroups: [!Ref AlbSecurityGroup]
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: default
+      ServiceName: savr
+      DesiredCount: 1
+      LaunchType: FARGATE
+      TaskDefinition: !Ref TaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: [!Ref SubnetA, !Ref SubnetB]
+          SecurityGroups: [!Ref AppSecurityGroup]
+      LoadBalancers:
+        - ContainerName: savr
+          ContainerPort: 3000
+          TargetGroupArn: !Ref TargetGroup
+
+Outputs:
+  AppUrl:
+    Value: !Sub "http://${LoadBalancer.DNSName}"
+  LoadBalancerDns:
+    Value: !GetAtt LoadBalancer.DNSName
+  TaskDefinitionArn:
+    Value: !Ref TaskDefinition

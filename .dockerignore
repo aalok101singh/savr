@@ -1,0 +1,15 @@
+node_modules
+**/node_modules
+.git
+.gitignore
+.env
+dist
+infra
+docs
+tasks
+*.md
+DECISIONS.md
+PROGRESS.md
+HANDOFF.md
+savr-2.0-*.md
+qodo review.md

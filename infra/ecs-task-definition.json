@@ -1,0 +1,40 @@
+{
+  "family": "savr",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "REPLACE_WITH_EXECUTION_ROLE_ARN",
+  "taskRoleArn": "REPLACE_WITH_TASK_ROLE_ARN",
+  "containerDefinitions": [
+    {
+      "name": "savr",
+      "image": "REPLACE_WITH_ECR_IMAGE_URI",
+      "essential": true,
+      "portMappings": [{ "containerPort": 3000, "protocol": "tcp" }],
+      "environment": [
+        { "name": "HOST", "value": "0.0.0.0" },
+        { "name": "API_PORT", "value": "3000" },
+        { "name": "AWS_REGION", "value": "us-east-1" },
+        { "name": "DEMO_MODE", "value": "false" },
+        { "name": "AUTOPILOT_ENABLED", "value": "false" },
+        { "name": "DEBUG_MODE", "value": "false" }
+      ],
+      "secrets": [
+        {
+          "name": "API_TOKEN",
+          "valueFrom": "REPLACE_WITH_SECRET_ARN:API_TOKEN"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/savr",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "savr",
+          "awslogs-create-group": "true"
+        }
+      }
+    }
+  ]
+}

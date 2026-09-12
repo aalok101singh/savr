@@ -92,6 +92,77 @@ See `AGENTS.md` for build levels.
 
 > AWS prereqs (live mode only): credentials with Bedrock access (Sonnet 4.6, `us-east-1`). The deterministic demo runs fully offline with `DEMO_MODE=true`. One-time account setup (budget alert, least-privilege IAM) is in `docs/07-build-plan.md` → "AWS Cost Guardrails".
 
+#### Deploying to AWS (ECS Fargate)
+
+Real Bedrock live mode is the only thing standing between the local demo and the
+deployed service. The wiring is one-time; the `infra/` directory is the runbook.
+
+**0 — Enable the model (console, one time).** In the Bedrock console (us-east-1) →
+Model access → request access for `Anthropic Claude Sonnet 4.6`
+(`anthropic.claude-sonnet-4-6`). This is separate from IAM and the failure mode if
+you get `model access is blocked` on the first live call.
+
+**1 — Grant the dev/deploy identity Bedrock (the current gap).** The live probe
+`RUN_LIVE_AKS=true npm run validate:l4.5` fails today with
+`User: .../savr-dev is not authorized to perform bedrock:InvokeModelWithResponseStream`.
+Attach the least-privilege policy (Bedrock invoke + ECR push + deploy rights):
+
+```bash
+aws iam put-user-policy --user-name savr-dev \
+  --policy-name savr-agent-deploy \
+  --policy-document file://infra/bedrock-iam-policy.json
+```
+
+**2 — Build, tag, push the image:**
+
+```bash
+aws ecr create-repository --repository-name savr || true
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin \
+  <ACCOUNT>.dkr.ecr.us-east-1.amazonaws.com
+docker build -f infra/Dockerfile -t savr:latest .
+docker tag savr:latest <ACCOUNT>.dkr.ecr.us-east-1.amazonaws.com/savr:latest
+docker push <ACCOUNT>.dkr.ecr.us-east-1.amazonaws.com/savr:latest
+```
+
+**3 — API token secret (the request gate).** Generate a token and store it so the
+task role can fetch it (never a literal env var):
+
+```bash
+aws secretsmanager create-secret --name savr/api-token \
+  --secret-string "{\"API_TOKEN\":\"$(openssl rand -hex 24)\"}"
+```
+
+**4 — Deploy the stack** (ECS Fargate service + ALB + roles), then hit the URL:
+
+```bash
+aws cloudformation create-stack \
+  --stack-name savr \
+  --template-body file://infra/cloudformation/deploy.yaml \
+  --parameters \
+    ParameterKey=ImageUri,ParameterValue=<ACCOUNT>.dkr.ecr.us-east-1.amazonaws.com/savr:latest \
+    ParameterKey=VpcId,ParameterValue=vpc-<default-vpc> \
+    ParameterKey=SubnetA,ParameterValue=subnet-<a> \
+    ParameterKey=SubnetB,ParameterValue=subnet-<b> \
+    ParameterKey=ApiTokenSecretArn,ParameterValue=arn:aws:secretsmanager:us-east-1:<ACCOUNT>:secret:savr/api-token-<suffix> \
+    ParameterKey=DemoMode,ParameterValue=false \
+  --capabilities CAPABILITY_IAM
+# URL is in the stack Outputs (AppUrl). Verify: curl <AppUrl>/health
+```
+
+**5 — Autonomous trigger.** For the "runs on its own" story in production set
+`AutopilotEnabled=true` on the stack (Guardian loops in the running service). If you
+ever want the trigger entirely in AWS infrastructure, point an EventBridge schedule
+at an `ecs run-task` of the same `savr` task family — the in-process loop is what the
+demo uses and is sufficient.
+
+**Cost & teardown:** one Fargate task (0.5 vCPU / 1 GB) ≈ $20–25/mo + Bedrock token
+costs (guard with the budget alert). Remove with
+`aws cloudformation delete-stack --stack-name savr`.
+
+**Fallback (documented, zero cost):** if a deploy attempt eats time, the app runs
+identically locally with `DEMO_MODE=true`; `infra/` is the full, working step list to
+deploy later. Deployment is a stretch bonus, never a blocker for the demo.
+
 ## Security
 
 `.env` is gitignored and never committed. Copy `.env.example` → `.env` and fill in real
