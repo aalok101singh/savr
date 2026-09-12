@@ -205,27 +205,47 @@ async function run(): Promise<void> {
   assert(figmaPkg?.action === "NEGOTIATE", "T4 figma recommended NEGOTIATE (unused seats + renewal)", figmaPkg?.action);
 
   const cardsAfterLive = await json<
-    Array<{ subscriptionId: string; action: string; status: string; resolution?: string }>
+    Array<{ id: string; subscriptionId: string; action: string; status: string; resolution?: string }>
   >("/api/decisions/pending");
   const figmaNegCard = cardsAfterLive.body.find((c) => c.subscriptionId === "figma" && c.action === "NEGOTIATE");
-  assert(figmaNegCard !== undefined, "T4 negotiator actually ran for figma (not notion)", cardsAfterLive.body);
+  assert(figmaNegCard !== undefined, "T4 figma NEGOTIATE card created (not hardcoded notion)", cardsAfterLive.body);
   assert(
     figmaNegCard?.status === "pending",
-    "T4 figma negotiation produced a pending card",
+    "T4 figma negotiation card is pending",
     figmaNegCard
   );
   const loomSwitchCard = cardsAfterLive.body.find((c) => c.subscriptionId === "loom" && c.action === "SWITCH");
   assert(loomSwitchCard !== undefined, "T4 generic SWITCH loop runs keyed off package", cardsAfterLive.body);
 
-  const figmaNegotiation = await json<{ resolution: string; subscriptionId: string }>(
-    "/api/negotiation/figma"
-  );
-  assert(figmaNegotiation.body.subscriptionId === "figma", "T4 negotiation state stored for figma", figmaNegotiation.body);
+  // The human gate precedes vendor contact: the live run must NOT have engaged
+  // the vendor yet, so no negotiation state exists until the card is approved.
+  const figmaNegBefore = await json<{ error: string }>("/api/negotiation/figma");
   assert(
-    ["stalled", "accepted"].includes(figmaNegotiation.body.resolution),
-    "T4 figma negotiation resolved gracefully (stalled is expected without the vendor in the sandbox)",
-    figmaNegotiation.body
+    figmaNegBefore.status === 404,
+    "T4 negotiation state absent until approval (vendor not contacted)",
+    figmaNegBefore
   );
+
+  // Approving the NEGOTIATE card is what starts the negotiation. The transition
+  // must be graceful: either the vendor accepts (mutation applies) or the
+  // negotiation stalls/rounds out and the approval is refused with a conflict —
+  // a failed negotiation is never approvable.
+  const approveFigma = await json<{ card?: { status: string; realizedSavings?: number }; error?: string }>(
+    `/api/decisions/${figmaNegCard!.id}/approve`,
+    { method: "POST" }
+  );
+  if (approveFigma.status === 200) {
+    assert(approveFigma.body.card?.status === "approved", "T4 figma approval applied accepted negotiation", approveFigma.body);
+    const figmaNegotiation = await json<{ resolution: string; subscriptionId: string }>("/api/negotiation/figma");
+    assert(figmaNegotiation.body.subscriptionId === "figma", "T4 negotiation state stored for figma", figmaNegotiation.body);
+    assert(figmaNegotiation.body.resolution === "accepted", "T4 figma negotiation accepted", figmaNegotiation.body);
+  } else {
+    assert(
+      approveFigma.status === 409 && typeof approveFigma.body.error === "string" && approveFigma.body.error.length > 0,
+      "T4 failed negotiation gracefully refused approval (409)",
+      approveFigma
+    );
+  }
 
   // ──────────────────────────────────────────────────────
   // T5 — optional real-Bedrock probe (only when RUN_LIVE_AKS=true).
@@ -342,7 +362,7 @@ async function run(): Promise<void> {
   console.log("T1 PASS -> mock mode byte-identical: 5 packages / 2 pending / 3 autonomous / savings 0");
   console.log("T2 PASS -> /api/session/company accepts non-Acme company, rejects malformed");
   console.log("T3 PASS -> /api/stack/import accepts non-Acme stack (figma/loom/veed)");
-  console.log("T4 PASS -> live run evaluated figma, negotiator ran FOR figma (not hardcoded notion); SWITCH loop generic");
+  console.log("T4 PASS -> live run flagged figma NEGOTIATE without contacting the vendor; negotiation only begins on approval");
   console.log("T6 PASS -> mock after live still canonical ($5,760-canon), guardian_progress ordered during run");
   console.log("T7 PASS -> demo/reset restores pristine 14-sub seed");
   console.log("T8 PASS -> zero-result live run completes gracefully (0 packages / 0 pending)");

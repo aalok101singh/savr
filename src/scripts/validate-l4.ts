@@ -74,13 +74,26 @@ async function run(): Promise<void> {
   const notionCard = pendingRes.body.find((c) => c.subscriptionId === "notion")!;
   const loomCard = pendingRes.body.find((c) => c.subscriptionId === "loom")!;
   assert(notionCard.action === "NEGOTIATE", "T4 notion action NEGOTIATE", notionCard.action);
-  assert(notionCard.realizedSavings === 2160, "T4 notion realized savings 2160", notionCard.realizedSavings);
-  assert(notionCard.estimatedSavings === 2160, "T4 notion card estimated savings mirrors realized (2160)", notionCard.estimatedSavings);
+  assert(notionCard.realizedSavings === 0, "T4 notion realized savings 0 before negotiation", notionCard.realizedSavings);
+  assert(notionCard.estimatedSavings === 0, "T4 notion card has no estimate until negotiated", notionCard.estimatedSavings);
   assert(loomCard.action === "SWITCH", "T4 loom action SWITCH", loomCard.action);
   assert(loomCard.estimatedSavings === 3600, "T4 loom estimated savings 3600", loomCard.estimatedSavings);
   assert(loomCard.realizedSavings === 0, "T4 loom realized savings 0", loomCard.realizedSavings);
 
-  // T5 — negotiation log (money shot)
+  // T5 — approve notion. Approving the NEGOTIATE card is the human decision that
+  // lets the negotiator engage the vendor; the accepted offer then applies.
+  const approve1 = await json<{ card: DecisionCard; mutation: { changes: Record<string, unknown> } }>(
+    `/api/decisions/${notionCard.id}/approve`,
+    { method: "POST" }
+  );
+  assert(approve1.status === 200, "T6 approve notion 200", approve1.status);
+  assert(approve1.body.card.status === "approved", "T6 notion card approved", approve1.body.card.status);
+  assert(approve1.body.mutation.changes.renewalCost === 9840, "T6 NEGOTIATE mutation renewalCost 9840", approve1.body.mutation);
+  const afterApprove1 = await json<Subscription[]>("/api/subscriptions");
+  const notionSub = afterApprove1.body.find((s) => s.id === "notion")!;
+  assert(notionSub.renewalCost === 9840, "T6 notion.renewalCost = 9840", notionSub.renewalCost);
+
+  // T5b — negotiation log (money shot) exists now the approved card negotiated
   const neg = await json<NegotiationState>("/api/negotiation/notion");
   assert(neg.status === 200, "T5 negotiation 200", neg.status);
   assert(neg.body.round === 3, "T5 3 rounds", neg.body.round);
@@ -89,11 +102,11 @@ async function run(): Promise<void> {
   assert(neg.body.buyerOfferPrice === 9800, "T5 structured buyerOfferPrice $9,800", neg.body.buyerOfferPrice);
   assert(neg.body.proposedAcceptPrice === 10000, "T5 proposedAcceptPrice $10,000", neg.body.proposedAcceptPrice);
 
-  // T5b — decisions endpoint returns 5 packages
+  // T5c — decisions endpoint returns 5 packages
   const packagesRes = await json<DecisionPackage[]>("/api/decisions");
   assert(packagesRes.body.length === 5, "T5b decisions returns 5 packages", packagesRes.body.length);
 
-  // T5c — negotiation transcript records both roles with per-round offers
+  // T5d — negotiation transcript records both roles with per-round offers
   const transcript = neg.body.messages;
   assert(transcript.length >= 6, "T5c transcript records agent + vendor per round", transcript.length);
   const transcriptAgent = transcript.filter((m) => m.role === "agent");
@@ -111,18 +124,6 @@ async function run(): Promise<void> {
     "T5c every agent/vendor message carries round buyer offer 9800",
     transcript.map((m) => m.buyerOfferPrice)
   );
-
-  // T6 — approve notion: PostApprovalMutation applies renewalCost 9840
-  const approve1 = await json<{ card: DecisionCard; mutation: { changes: Record<string, unknown> } }>(
-    `/api/decisions/${notionCard.id}/approve`,
-    { method: "POST" }
-  );
-  assert(approve1.status === 200, "T6 approve notion 200", approve1.status);
-  assert(approve1.body.card.status === "approved", "T6 notion card approved", approve1.body.card.status);
-  assert(approve1.body.mutation.changes.renewalCost === 9840, "T6 NEGOTIATE mutation renewalCost 9840", approve1.body.mutation);
-  const afterApprove1 = await json<Subscription[]>("/api/subscriptions");
-  const notionSub = afterApprove1.body.find((s) => s.id === "notion")!;
-  assert(notionSub.renewalCost === 9840, "T6 notion.renewalCost = 9840", notionSub.renewalCost);
 
   // T7 — idempotent approve returns 200 with same result
   const approve2 = await json<{ card: DecisionCard }>(`/api/decisions/${notionCard.id}/approve`, { method: "POST" });
@@ -211,8 +212,8 @@ async function main(): Promise<void> {
   console.log("T1 PASS -> /api/subscriptions returns 14 rows");
   console.log("T2 PASS -> demo/reset restores; never-negotiated returns 404");
   console.log("T3 PASS -> demo/run synchronous: 5 packages, 2 pending, 3 autonomous, savings 0");
-  console.log("T4 PASS -> pending cards = notion NEGOTIATE (2160/2160) + loom SWITCH (3600/0)");
-  console.log("T5 PASS -> negotiation log: 3 rounds, offer $9,840, accepted, buyerOffer $9,800");
+  console.log("T4 PASS -> pending cards = notion NEGOTIATE (0 until negotiated) + loom SWITCH (3600/0)");
+  console.log("T5 PASS -> approve notion triggers negotiation: 3 rounds, offer $9,840, accepted, buyerOffer $9,800");
   console.log("T5c PASS -> transcript: both roles, per-round offers 10,800 / 10,200 / 9,840");
   console.log("T6 PASS -> approve notion => renewalCost 9840");
   console.log("T7 PASS -> repeated approve idempotent (200, approved)");

@@ -19,7 +19,8 @@ Savr runs in the background and fixes this.
 
 - **Guardian** — Continuously monitors your SaaS stack. Flags renewals, unused seats, overlapping tools, and price increases. Benchmarks market pricing. Recommends actions with evidence.
 - **Negotiator** — Engages vendors in structured rounds when Guardian recommends NEGOTIATE. The LLM handles strategy and language; code owns financial boundaries.
-- **Human Gate** — NEGOTIATE and SWITCH always require human approval. KEEP, DOWNGRADE, and CANCEL run autonomously. Policy is deterministic and authoritative — the agent never violates your rules.
+- **Human Gate** — NEGOTIATE and SWITCH always require human approval. KEEP, DOWNGRADE, and CANCEL run autonomously. Policy is deterministic and authoritative — the agent never violates your rules. A NEGOTIATE card that passes the human gate only then authorizes the Negotiator to contact the vendor; if the negotiation does not reach an accepted agreement, the approval is refused and no mutation is applied.
+- **Security** — The API binds to `127.0.0.1` by default. State-changing routes (imports, resets, approvals, demo runs, debug negotiation) require a bearer token when the deployment sets `API_TOKEN`; debug negotiation routes are additionally compiled out unless `DEBUG_MODE=true` is set. See [Deployment](#deployment).
 
 ## Architecture
 
@@ -61,7 +62,7 @@ Built with the Strands Agents SDK for TypeScript (`@strands-agents/sdk@1.14.0`).
 ```bash
 npm install
 npm --prefix ui install    # UI dependencies (needed for ui:* scripts and rebuilds)
-npm run demo:test          # L5 acceptance E2E: seed → guardian → negotiate → card → approve → savings = 5760
+npm run demo:test          # L5 acceptance E2E: seed → guardian → cards → approve → negotiate → savings = 5760
 npm run validate:data      # Validate synthetic data (14 subs, $47,400, 32 unused seats)
 npm run guardian           # Run the Guardian loop
 npm run negotiate          # Run Guardian + Negotiator
@@ -73,6 +74,14 @@ npm run demo:run           # Run canonical demo pipeline (synchronous)
 
 The built UI is committed at `ui/dist`, so `npm run dev` serves the full app with no
 extra steps. Rebuild with `npm run build:ui`.
+
+### Deployment
+
+The API binds to the loopback interface by default (`HOST=127.0.0.1`). To serve the
+API beyond loopback (Docker, hosted backend), set `HOST` explicitly **and** configure
+`API_TOKEN` — every state-changing `/api` route then requires
+`Authorization: Bearer $API_TOKEN` and rejects otherwise. Debug negotiation routes
+are only registered when `DEBUG_MODE=true`.
 
 **Autonomous trigger (opt-in):** `AUTOPILOT_ENABLED=true npm run dev` — Guardian re-runs
 on its own every `AUTOPILOT_INTERVAL_MS` (default 120s) and surfaces anything newly

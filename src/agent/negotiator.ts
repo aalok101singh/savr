@@ -245,7 +245,6 @@ export async function runNegotiation(
     }
     state.buyerOfferPrice = output.buyerOfferPrice;
     state.proposedAcceptPrice = output.proposedAcceptPrice;
-    pushAgentMessage(state, output, now.toISOString());
 
     const result = await sendNegotiationMessage(sub.id, output.message, output.buyerOfferPrice, {
       round: state.round,
@@ -263,6 +262,11 @@ export async function runNegotiation(
       console.warn(`[negotiator] stalled: send error '${result.error}'.`);
       break;
     }
+
+    // The durable transcript only records the buyer's message once the vendor
+    // actually received it — a failed send must not leave a phantom message
+    // behind for a retry to double.
+    pushAgentMessage(state, output, now.toISOString());
 
     const parsed = parseVendorResponse(result.offer ? JSON.stringify(result.offer) : result.response);
     if (parsed.status === "parse_failure") {

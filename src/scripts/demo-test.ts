@@ -68,10 +68,27 @@ async function run(): Promise<void> {
   const loomCard = pending.body.find((c) => c.subscriptionId === "loom" && c.action === "SWITCH");
   assert(notionCard !== undefined, "PENDING notion NEGOTIATE card", pending.body.map((c) => c.subscriptionId));
   assert(loomCard !== undefined, "PENDING loom SWITCH card", pending.body.map((c) => c.subscriptionId));
-  assert(notionCard?.realizedSavings === 2160, "PENDING notion realized $2,160", notionCard?.realizedSavings);
+  // The human gate precedes any vendor contact: before approval there is no
+  // negotiation yet, so the pending card has no realized savings and the
+  // negotiation endpoint is untouched.
+  assert(notionCard?.realizedSavings === 0, "PENDING notion realized $0 until negotiation runs", notionCard?.realizedSavings);
+  assert(notionCard?.estimatedSavings === 0, "PENDING notion estimated $0 pre-negotiation", notionCard?.estimatedSavings);
+
+  const negBefore = await json<{ error: string }>("/api/negotiation/notion");
+  assert(negBefore.status === 404, "NEGOTIATION not started before approval (404)", negBefore.status);
+
+  // 3. Human gate — approving the NEGOTIATE card is the decision that lets the
+  //    negotiator engage the vendor; approving SWITCH applies the switch.
+  const approveNotion = await json<{ card: DecisionCard }>(`/api/decisions/${notionCard!.id}/approve`, { method: "POST" });
+  assert(approveNotion.status === 200, "APPROVE notion 200", approveNotion.status);
+  assert(approveNotion.body.card.status === "approved", "APPROVE notion approved", approveNotion.body.card.status);
+  assert(approveNotion.body.card.realizedSavings === 2160, "APPROVE notion realized $2,160", approveNotion.body.card.realizedSavings);
+  const afterNotion = await json<Subscription[]>("/api/subscriptions");
+  const notionSub = afterNotion.body.find((s) => s.id === "notion")!;
+  assert(notionSub.renewalCost === 9840, "APPROVE notion renewalCost 9,840", notionSub.renewalCost);
 
   const neg = await json<NegotiationState>("/api/negotiation/notion");
-  assert(neg.status === 200, "NEGOTIATION 200", neg.status);
+  assert(neg.status === 200, "NEGOTIATION 200 after approval", neg.status);
   assert(neg.body.round === 3, "NEGOTIATION 3 rounds", neg.body.round);
   assert(neg.body.resolution === "accepted", "NEGOTIATION accepted", neg.body.resolution);
   assert(neg.body.currentOffer?.totalAnnual === 9840, "NEGOTIATION final offer $9,840", neg.body.currentOffer);
@@ -81,14 +98,6 @@ async function run(): Promise<void> {
     "NEGOTIATION offer path 10,800 → 10,200 → 9,840",
     vendorOffers
   );
-
-  // 3. Human gate — approve both actions
-  const approveNotion = await json<{ card: DecisionCard }>(`/api/decisions/${notionCard!.id}/approve`, { method: "POST" });
-  assert(approveNotion.status === 200, "APPROVE notion 200", approveNotion.status);
-  assert(approveNotion.body.card.status === "approved", "APPROVE notion approved", approveNotion.body.card.status);
-  const afterNotion = await json<Subscription[]>("/api/subscriptions");
-  const notionSub = afterNotion.body.find((s) => s.id === "notion")!;
-  assert(notionSub.renewalCost === 9840, "APPROVE notion renewalCost 9,840", notionSub.renewalCost);
 
   const approveLoom = await json<{ card: DecisionCard }>(`/api/decisions/${loomCard!.id}/approve`, { method: "POST" });
   assert(approveLoom.status === 200, "APPROVE loom 200", approveLoom.status);

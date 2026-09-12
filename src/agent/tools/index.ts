@@ -15,9 +15,16 @@ import { checkPolicy } from "./check-policy.js";
  * `webEvidence` is the per-run overlay from the live web-search enrichment
  * (`src/agent/web-evidence.ts`). Optional: when absent (mock runs), research tools
  * consult only the cached evidence, exactly as before — no behavior change.
+ *
+ * `opts.negotiationTool` defaults to `true` for the Negotiator. The Guardian never
+ * receives `send_negotiation_message`: contacting a vendor is only legal from the
+ * approved NEGOTIATE transition, never from a recommendation evaluation.
  */
-export function buildTools(webEvidence?: Record<string, Evidence[]>): Tool[] {
-  return [
+export function buildTools(
+  webEvidence?: Record<string, Evidence[]>,
+  opts: { negotiationTool?: boolean } = {}
+): Tool[] {
+  const tools: Tool[] = [
     tool({
       name: "check_renewals",
       description:
@@ -48,26 +55,6 @@ export function buildTools(webEvidence?: Record<string, Evidence[]>): Tool[] {
       callback: ({ category, currentVendorId }) => searchAlternatives(category, currentVendorId, webEvidence),
     }),
     tool({
-      name: "send_negotiation_message",
-      description:
-        "Send a message to a vendor in an ongoing renewal negotiation. The vendor sandbox will respond with a counter-offer or accept.",
-      inputSchema: z.object({
-        vendorId: z.string(),
-        subscriptionId: z.string(),
-        message: z.string(),
-        round: z.number().int(),
-        buyerOfferPrice: z.number(),
-        buyerCurrentPrice: z.number(),
-      }),
-      callback: ({ vendorId, subscriptionId, message, round, buyerOfferPrice, buyerCurrentPrice }) =>
-        sendNegotiationMessage(
-          vendorId,
-          message,
-          buyerOfferPrice,
-          { round, buyerCurrentPrice }
-        ),
-    }),
-    tool({
       name: "parse_vendor_response",
       description:
         "Parse a vendor response into structured negotiation fields: counterOffer, status, terms, and reasoning.",
@@ -89,4 +76,29 @@ export function buildTools(webEvidence?: Record<string, Evidence[]>): Tool[] {
         checkPolicy(action as never, subscriptionId, loadPolicy(), estimatedSavings),
     }),
   ];
+  if (opts.negotiationTool !== false) {
+    tools.push(
+      tool({
+        name: "send_negotiation_message",
+        description:
+          "Send a message to a vendor in an ongoing renewal negotiation. The vendor sandbox will respond with a counter-offer or accept.",
+        inputSchema: z.object({
+          vendorId: z.string(),
+          subscriptionId: z.string(),
+          message: z.string(),
+          round: z.number().int(),
+          buyerOfferPrice: z.number(),
+          buyerCurrentPrice: z.number(),
+        }),
+        callback: ({ vendorId, subscriptionId, message, round, buyerOfferPrice, buyerCurrentPrice }) =>
+          sendNegotiationMessage(
+            vendorId,
+            message,
+            buyerOfferPrice,
+            { round, buyerCurrentPrice }
+          ),
+      })
+    );
+  }
+  return tools;
 }

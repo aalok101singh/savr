@@ -1,4 +1,3 @@
-import { getDemoDate } from "../utils/demo-clock.js";
 import {
   ensureSeed,
   loadCards,
@@ -11,10 +10,15 @@ import {
   seedSubscriptions,
 } from "../utils/data-files.js";
 import { runGuardian } from "../agent/guardian.js";
-import { runNegotiation } from "../agent/negotiator.js";
 import { broadcastSse, clearRecording } from "./sse.js";
-import { computeSavings, deriveAgentStatus, pendingCount } from "./state.js";
-import type { DecisionCard, DecisionPackage, DemoResetResponse, Subscription } from "../types/index.js";
+import {
+  clearAgentRunStatus,
+  computeSavings,
+  deriveAgentStatus,
+  pendingCount,
+  setAgentRunStatus,
+} from "./state.js";
+import type { DemoResetResponse } from "../types/index.js";
 
 export type DemoMode = "mock" | "live";
 
@@ -31,8 +35,10 @@ export interface DemoRunOptions {
   mode?: DemoMode;
 }
 
-// Shared agent-run lock: a manual `demo/run` and the autonomous scheduler must never
-// run Guardian or the negotiator concurrently — both clobber the same cards/packages.
+// Shared agent-run lock: a manual `demo/run`, an approval that triggers a
+// negotiation, and the autonomous scheduler must never run the agent concurrently
+// — everything clobbers the same cards/packages/subscriptions files. The lock also
+// backs the authoritative in-memory run status surfaced by /api/agent/status.
 let agentBusy = false;
 
 export function agentIsBusy(): boolean {
@@ -46,74 +52,7 @@ export async function withAgentLock<T>(fn: () => Promise<T>): Promise<T | null> 
     return await fn();
   } finally {
     agentBusy = false;
-  }
-}
-
-function buildSwitchCard(pkg: DecisionPackage, sub: Subscription, createdAt: string): DecisionCard {
-  return {
-    id: `card-switch-${sub.id}-${createdAt}`,
-    decisionPackageId: pkg.id,
-    subscriptionId: sub.id,
-    action: "SWITCH",
-    summary: `${sub.vendorName} overlaps ${pkg.reasoning}`.slice(0, 220),
-    details: pkg.reasoning,
-    estimatedSavings: pkg.estimatedSavings.amount,
-    realizedSavings: 0,
-    migrationNotes: "Consolidate onto the retained vendor (Veed) before renewal; cancel this subscription.",
-    alternatives: pkg.evidence
-      .filter((e) => e.type === "alternative_found")
-      .map((e) => {
-        const data = (e.data ?? {}) as Record<string, unknown>;
-        return {
-          vendorId: typeof data.vendorId === "string" ? data.vendorId : e.observedValue,
-          annualCost: typeof data.annualCost === "number" ? data.annualCost : 0,
-          summary: e.summary,
-        };
-      }),
-    createdAt,
-    status: "pending",
-    humanDecision: null,
-    decidedAt: null,
-  };
-}
-
-async function runCanonicalNegotiation(subscriptionId: string): Promise<void> {
-  broadcastSse("agent_status", { mode: "negotiator", pendingCardId: null, currentSubscriptionId: subscriptionId });
-
-  const { state, card, closeSandbox } = await runNegotiation(subscriptionId);
-  try {
-    const accepted = state.resolution === "accepted";
-    const normalized: DecisionCard = accepted
-      ? { ...card, estimatedSavings: card.realizedSavings }
-      : card;
-    const cards = loadCards().filter((c) => !(c.subscriptionId === subscriptionId && c.status === "pending"));
-    cards.push(normalized);
-    saveCards(cards);
-
-    for (const message of state.messages) {
-      broadcastSse("negotiation_message", {
-        subscriptionId: state.subscriptionId,
-        round: message.round,
-        role: message.role,
-        content: message.content,
-        currentOffer: message.currentOffer,
-        targetPrice: state.targetPrice,
-        maxAcceptablePrice: state.maxAcceptablePrice,
-        buyerOfferPrice: message.buyerOfferPrice,
-        proposedAcceptPrice: state.proposedAcceptPrice,
-      });
-    }
-    broadcastSse("decision_card", {
-      cardId: normalized.id,
-      subscriptionId: normalized.subscriptionId,
-      action: normalized.action,
-      status: normalized.status,
-      estimatedSavings: normalized.estimatedSavings,
-      realizedSavings: normalized.realizedSavings,
-      summary: normalized.summary,
-    });
-  } finally {
-    await closeSandbox();
+    clearAgentRunStatus();
   }
 }
 
@@ -128,9 +67,10 @@ export async function runDemo(options: DemoRunOptions = {}): Promise<DemoRunResu
     clearRecording();
   }
 
+  setAgentRunStatus("guardian", null);
   broadcastSse("agent_status", { mode: "guardian", pendingCardId: null, currentSubscriptionId: null });
 
-  const { packages, model } = await runGuardian({
+  const { packages, pendingCards, model } = await runGuardian({
     mode,
     onProgress: (event) => broadcastSse("guardian_progress", event),
   });
@@ -146,36 +86,16 @@ export async function runDemo(options: DemoRunOptions = {}): Promise<DemoRunResu
       requiresApproval: pkg.approvalRequirement === "requires_approval",
     });
   }
-  console.warn(`[api:demo] guardian done (${packages.length} packages, model=${model}).`);
+  console.warn(`[api:demo] guardian done (${packages.length} packages, ${pendingCards.length} approval card(s), model=${model}).`);
 
-  const createdAt = getDemoDate().toISOString();
-
-  for (const pkg of packages) {
-    if (pkg.action === "NEGOTIATE") {
-      try {
-        await runCanonicalNegotiation(pkg.subscriptionId);
-      } catch (err) {
-        broadcastSse("error", { code: "negotiation_failed", message: (err as Error).message });
-        console.warn(`[api:demo] negotiation failed for ${pkg.subscriptionId}: ${(err as Error).message}`);
-      }
-    }
-  }
-
-  const subscriptions = loadSubscriptions();
-  const existingCards = loadCards();
-  for (const pkg of packages) {
-    if (pkg.action !== "SWITCH") continue;
-    const target = subscriptions.find((s) => s.id === pkg.subscriptionId);
-    if (!target) {
-      console.warn(`[api:demo] SWITCH package for unknown subscription '${pkg.subscriptionId}'; skipping.`);
-      continue;
-    }
-    if (existingCards.some((c) => c.subscriptionId === pkg.subscriptionId && c.action === "SWITCH" && c.status === "pending")) {
-      continue;
-    }
-    const card = buildSwitchCard(pkg, target, createdAt);
+  // Persist the approval-required cards Guardian created (NEGOTIATE, SWITCH, and
+  // spend-threshold-crossing KEEP/DOWNGRADE/CANCEL). NEGOTIATE cards are persisted
+  // WITHOUT contacting the vendor — the negotiation only runs on the approved-card
+  // transition, so the human gate precedes any vendor contact. No card is
+  // duplicated: a pending card for the same (subscription, action) is replaced.
+  for (const card of pendingCards) {
     const cards = loadCards().filter(
-      (c) => !(c.subscriptionId === pkg.subscriptionId && c.action === "SWITCH" && c.status === "pending")
+      (c) => !(c.subscriptionId === card.subscriptionId && c.action === card.action && c.status === "pending")
     );
     cards.push(card);
     saveCards(cards);
@@ -188,8 +108,10 @@ export async function runDemo(options: DemoRunOptions = {}): Promise<DemoRunResu
       realizedSavings: card.realizedSavings,
       summary: card.summary,
     });
+    console.warn(`[api:demo] ${card.subscriptionId}: ${card.action} requires approval — card ${card.id} persisted.`);
   }
 
+  const subscriptions = loadSubscriptions();
   const cards = loadCards();
   broadcastSse("savings_update", computeSavings(cards));
   broadcastSse("agent_status", deriveAgentStatus());
@@ -215,9 +137,10 @@ export function resetDemo(): DemoResetResponse {
   savePackages([]);
   clearRecording();
 
-  broadcastSse("savings_update", computeSavings([]));
-  broadcastSse("agent_status", deriveAgentStatus());
-  broadcastSse("error", { code: "memory_unavailable", message: "Local mode — procurement memory stored in data/memory.json." });
+  // A successful reset must look successful: keep the post-reset sync events out
+  // of the freshly cleared recording and never emit an error for a happy path.
+  broadcastSse("savings_update", computeSavings([]), { record: false });
+  broadcastSse("agent_status", deriveAgentStatus(), { record: false });
 
   return {
     subscriptionsReset,

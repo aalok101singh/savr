@@ -1,6 +1,6 @@
 import { Agent, BeforeToolCallEvent, BedrockModel, type JSONValue, type Model } from "@strands-agents/sdk";
 import { loadEnv } from "../utils/env.js";
-import { loadCachedEvidence, loadPolicy, loadSubscriptions } from "../utils/data-files.js";
+import { loadCachedEvidence, loadPolicy, loadSubscriptions, saveSubscriptions } from "../utils/data-files.js";
 import { getDemoDate } from "../utils/demo-clock.js";
 import { GuardianOutputSchema, type ParsedGuardianOutput } from "./schemas.js";
 import { buildTools } from "./tools/index.js";
@@ -362,7 +362,7 @@ export function createGuardianAgent(model: Model, opts?: { webEvidence?: Record<
   const all = loadSubscriptions();
   const agent = new Agent({
     model,
-    tools: buildTools(opts?.webEvidence),
+    tools: buildTools(opts?.webEvidence, { negotiationTool: false }),
     systemPrompt: SYSTEM_PROMPT,
     structuredOutputSchema: GuardianOutputSchema,
     appState: {
@@ -446,6 +446,7 @@ export async function runGuardian(options: RunGuardianOptions = {}): Promise<{
       const savings = computeEstimatedSavings(output.action, subscription);
       const evidenceMap: Record<string, Evidence> = {
         ...globalEvidence,
+        ...(webEvidence ? Object.values(webEvidence).flat().reduce((acc, e) => { acc[e.id] = e; return acc; }, {} as Record<string, Evidence>) : {}),
         [internalEvidenceFor(subscription, now).id]: internalEvidenceFor(subscription, now),
       };
       const evidence = resolveEvidence(output.evidenceIds, evidenceMap);
@@ -468,10 +469,29 @@ export async function runGuardian(options: RunGuardianOptions = {}): Promise<{
         pendingCards.push(card);
         console.warn(`[guardian] ${subscription.id}: ${output.action} requires approval — pending card ${card.id}.`);
       } else {
-        const mutation = executeAction(subscription, output.action);
-        console.warn(
-          `[guardian] ${subscription.id}: ${output.action} executed autonomously — mutation ${JSON.stringify(mutation.changes)}.`
-        );
+        try {
+          const mutation = executeAction(subscription, output.action);
+          if (mutation.newSubscription) {
+            const idx = all.findIndex((s) => s.id === mutation.newSubscription!.id);
+            if (idx >= 0) {
+              all[idx] = mutation.newSubscription;
+            } else {
+              all.push(mutation.newSubscription);
+            }
+          } else {
+            for (const [key, value] of Object.entries(mutation.changes)) {
+              (subscription as unknown as Record<string, unknown>)[key] = value;
+            }
+          }
+          saveSubscriptions(all);
+          console.warn(
+            `[guardian] ${subscription.id}: ${output.action} executed autonomously and persisted — mutation ${JSON.stringify(mutation.changes)}.`
+          );
+        } catch (err) {
+          console.warn(
+            `[guardian] ${subscription.id}: autonomous ${output.action} NOT executed (${(err as Error).message}).`
+          );
+        }
       }
     } catch (err) {
       onProgress?.({

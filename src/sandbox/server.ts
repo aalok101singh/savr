@@ -157,10 +157,14 @@ export function createVendorApp(): Express {
     }
 
     recordRound(state, round, buyerOfferPrice, offer);
-    if (round >= policy.maxRounds) {
-      setNegotiationStatus(state, "max_rounds");
-    } else if (state.status !== "accepted") {
-      setNegotiationStatus(state, "negotiating");
+    // Terminal-state selection must be mutually exclusive: an acceptance reached
+    // on the final allowed round is a SUCCESS, never a max_rounds exhaustion.
+    if (state.status !== "accepted") {
+      if (round >= policy.maxRounds) {
+        setNegotiationStatus(state, "max_rounds");
+      } else {
+        setNegotiationStatus(state, "negotiating");
+      }
     }
 
     const response = {

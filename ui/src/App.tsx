@@ -80,15 +80,23 @@ export default function App() {
   const hydrateDirector = director.hydrate;
 
   const fetchSnapshot = useCallback(async (): Promise<Snapshot> => {
-    const [subs, pkgs, cards, saved, pol, stat, neg] = await Promise.all([
+    const [subs, pkgs, cards, saved, pol, stat] = await Promise.all([
       getJson<Subscription[]>("/api/subscriptions"),
       getJson<DecisionPackage[]>("/api/decisions"),
       getJson<DecisionCard[]>("/api/decisions/pending"),
       getJson<{ totalSavings: number; approvedCount: number; lastAction: string | null }>("/api/savings"),
       getJson<Policy>("/api/policy"),
       getJson<AgentStatusState>("/api/agent/status"),
-      getJson<NegotiationState>("/api/negotiation/notion").catch(() => null),
     ]);
+    // Hydrate the negotiation from whatever subscription actually negotiated —
+    // the pending NEGOTIATE card first, then the persisted packages — instead of
+    // hardcoding a single vendor id.
+    const negotiatedIds = [
+      ...cards.filter((c) => c.action === "NEGOTIATE").map((c) => c.subscriptionId),
+      ...pkgs.filter((p) => p.action === "NEGOTIATE").map((p) => p.subscriptionId),
+    ];
+    const negSubscriptionId = negotiatedIds[0] ?? "notion";
+    const neg = await getJson<NegotiationState>(`/api/negotiation/${encodeURIComponent(negSubscriptionId)}`).catch(() => null);
     return { subs, pkgs, cards, saved, pol, stat, neg };
   }, []);
 
@@ -185,11 +193,6 @@ export default function App() {
       setRunning(false);
     }
   }, [enterDashboard]);
-
-  const loadRecordingRef = useRef(loadRecording);
-  loadRecordingRef.current = loadRecording;
-  const runLiveDemoRef = useRef(runLiveDemo);
-  runLiveDemoRef.current = runLiveDemo;
 
   const onSse = useCallback(
     (eventName: string, data: unknown) => {

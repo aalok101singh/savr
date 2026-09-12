@@ -20,6 +20,11 @@ export function policyGuardrail(event: BeforeToolCallEvent): void {
   }
 
   if (toolName === "send_negotiation_message") {
+    const mode = (event.invocationState.mode as string | undefined) ?? "";
+    if (mode !== "negotiator") {
+      event.cancel = `send_negotiation_message is only allowed from an approved NEGOTIATE transition (mode='negotiator'); current mode is '${mode || "unknown"}'.`;
+      return;
+    }
     if (policy.blacklist.includes(toolInput.vendorId as string)) {
       event.cancel = `Vendor '${toolInput.vendorId}' is blacklisted.`;
       return;

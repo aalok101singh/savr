@@ -9,6 +9,18 @@ import { resolveAutopilotInterval, startAutopilot } from "./autopilot.js";
 
 export const DEFAULT_API_PORT = 3000;
 
+// The API only listens on the loopback interface by default. To expose it beyond
+// loopback (hosted backend, Docker, etc.) you must set HOST explicitly — and that
+// deployment must also configure API_TOKEN, because state-changing and debug
+// routes reject requests that do not present the configured bearer token.
+export function resolveApiHost(): string {
+  const raw = process.env.HOST;
+  if (raw && raw.trim().length > 0) {
+    return raw.trim();
+  }
+  return "127.0.0.1";
+}
+
 export function resolveApiPort(): number {
   const raw = process.env.API_PORT;
   if (raw && raw.trim().length > 0) {
@@ -45,10 +57,11 @@ async function main(): Promise<void> {
   loadEnv();
   ensureSeed();
   const port = resolveApiPort();
+  const host = resolveApiHost();
   const app = createServerApp();
-  const server = app.listen(port);
+  const server = app.listen(port, host);
   const actualPort = (server.address() as { port: number } | null)?.port ?? port;
-  console.error(`[api] Savr API listening on http://127.0.0.1:${actualPort} (demo mode: ${process.env.DEMO_MODE})`);
+  console.error(`[api] Savr API listening on http://${host}:${actualPort} (demo mode: ${process.env.DEMO_MODE})`);
   if (process.env.AUTOPILOT_ENABLED === "true") {
     startAutopilot();
     console.error(

@@ -241,8 +241,11 @@ export function directorReducer(prev: DirectorState, frame: DirectorFrame): Dire
 function derivePhase(state: DirectorState): DirectorState["phase"] {
   if (state.error) return "error";
   if (state.savings > 0 && state.pendingIds.length === 0) return "resolved";
-  if (state.pendingIds.length > 0) return "approval";
+  // An approved NEGOTIATE transitions straight to the Negotiator: while the
+  // negotiation produces rounds the phase shows "negotiating", even though
+  // the resolution of those terms still happens under human authority.
   if (state.rounds.length > 0) return "negotiating";
+  if (state.pendingIds.length > 0) return "approval";
   if (state.spotlight.length > 0) return "guardian";
   return "idle";
 }

@@ -158,6 +158,30 @@ async function runSandboxApiChecks(base: string): Promise<void> {
   const unknown = await fetch(`${base}/vendor/nope/state`);
   assert(unknown.status === 404, "unknown vendor returns 404", unknown.status);
 
+  // Final-round acceptance must win: an offer accepted exactly on the last allowed
+  // round is a success, never a max_rounds exhaustion.
+  resetAllVendorState();
+  const finalRoundAccept = await postVendor(base, "notion", {
+    message: "final offer beyond counter",
+    round: 5,
+    buyerCurrentPrice: 12000,
+    buyerOfferPrice: 9600,
+  });
+  assert(
+    /accept your offer/i.test(finalRoundAccept.response),
+    "acceptance message on the max-allowable round",
+    finalRoundAccept.response
+  );
+  const finalAcceptState = (await fetch(`${base}/vendor/notion/state`).then((r) => r.json())) as {
+    status: string;
+    roundsCompleted: number;
+  };
+  assert(
+    finalAcceptState.status === "accepted",
+    "final-round acceptance is not overwritten by max_rounds",
+    finalAcceptState
+  );
+
   const badResponse = await fetch(`${base}/vendor/notion/message`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

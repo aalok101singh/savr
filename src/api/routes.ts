@@ -1,5 +1,5 @@
 import express from "express";
-import type { Express, Request, Response } from "express";
+import type { Express, NextFunction, Request, Response } from "express";
 import {
   defaultMemory,
   loadCards,
@@ -24,6 +24,15 @@ import type { Company, DecisionCard, Subscription } from "../types/index.js";
 const API_PREFIX = "/api";
 const SSE_HEARTBEAT_MS = 15000;
 
+// Debug negotiation routes exist only for development; they must be explicitly
+// enabled and still pass the auth gate + agent lock like every other endpoint.
+const DEBUG_ROUTES_ENABLED = process.env.DEBUG_MODE === "true";
+// Optional bearer token for state-changing and debug routes. When unset the API
+// still binds to the loopback interface by default, so nothing is exposed to the
+// network; any deployment that sets HOST to bind beyond loopback MUST also set
+// API_TOKEN or every POST /api/* route rejects with 401.
+const API_TOKEN = process.env.API_TOKEN?.trim() ?? "";
+
 let lastMode: DemoMode = "mock";
 
 function pendingCards(): DecisionCard[] {
@@ -44,12 +53,45 @@ function isCompany(value: unknown): value is Company {
   return typeof c.name === "string" && typeof c.employees === "number" && typeof c.annualBudget === "number";
 }
 
+function requireAuth(req: Request, res: Response, next: NextFunction): void {
+  if (!API_TOKEN) {
+    next();
+    return;
+  }
+  if (req.header("Authorization") !== `Bearer ${API_TOKEN}`) {
+    res.status(401).json({ error: "Unauthorized. Configure API_TOKEN and send Authorization: Bearer <token>." });
+    return;
+  }
+  next();
+}
+
+// Run a state mutation through the shared agent lock. Returns the mutation result
+// or throws a 409 when the agent (demo/run, autopilot, or a negotiation triggered
+// by an approval) is already running — resets, imports, and approvals must never
+// race the agent or each other over the same JSON files.
+async function lockGuard<T>(fn: () => Promise<T>): Promise<T> {
+  const result = await withAgentLock(fn);
+  if (result === null) {
+    throw new CardTransitionError("The agent is already running a check or demo; try again shortly.", 409);
+  }
+  return result;
+}
+
 export function createApiApp(): Express {
   const app = express();
   app.use(express.json());
 
   app.use((req: Request, res: Response, next: () => void) => {
     res.setHeader("X-Savr-Mode", lastMode);
+    next();
+  });
+
+  // Every state-changing /api route requires the configured bearer token.
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (req.method === "POST" && req.path.startsWith(API_PREFIX)) {
+      requireAuth(req, res, next);
+      return;
+    }
     next();
   });
 
@@ -87,17 +129,19 @@ export function createApiApp(): Express {
     res.json(card);
   });
 
-  app.post(`${API_PREFIX}/decisions/:cardId/approve`, (req: Request, res: Response) => {
+  app.post(`${API_PREFIX}/decisions/:cardId/approve`, async (req: Request, res: Response) => {
     try {
-      res.json(approveCard(String(req.params.cardId)));
+      const result = await lockGuard(() => approveCard(String(req.params.cardId)));
+      res.json(result);
     } catch (err) {
       cardErrorResponse(res, err);
     }
   });
 
-  app.post(`${API_PREFIX}/decisions/:cardId/reject`, (req: Request, res: Response) => {
+  app.post(`${API_PREFIX}/decisions/:cardId/reject`, async (req: Request, res: Response) => {
     try {
-      res.json(rejectCard(String(req.params.cardId)));
+      const result = await lockGuard(() => Promise.resolve(rejectCard(String(req.params.cardId))));
+      res.json(result);
     } catch (err) {
       cardErrorResponse(res, err);
     }
@@ -141,15 +185,20 @@ export function createApiApp(): Express {
     });
   });
 
-  app.post(`${API_PREFIX}/demo/reset`, (_req: Request, res: Response) => {
-    res.json(resetDemo());
+  app.post(`${API_PREFIX}/demo/reset`, async (_req: Request, res: Response) => {
+    try {
+      const result = await lockGuard(() => Promise.resolve(resetDemo()));
+      res.json(result);
+    } catch (err) {
+      cardErrorResponse(res, err);
+    }
   });
 
   app.get(`${API_PREFIX}/demo/recording`, (_req: Request, res: Response) => {
     res.json(getRecording());
   });
 
-  app.post(`${API_PREFIX}/session/company`, (req: Request, res: Response) => {
+  app.post(`${API_PREFIX}/session/company`, async (req: Request, res: Response) => {
     const body = req.body;
     if (!isCompany(body)) {
       res
@@ -157,100 +206,302 @@ export function createApiApp(): Express {
         .json({ error: "Expected a Company object with string 'name', number 'employees', number 'annualBudget'." });
       return;
     }
-    saveCompany(body);
-    broadcastSse("agent_status", deriveAgentStatus());
-    res.json({ status: "ok", company: body });
+    try {
+      await lockGuard(() => {
+        saveCompany(body);
+        broadcastSse("agent_status", deriveAgentStatus());
+        return Promise.resolve();
+      });
+      res.json({ status: "ok", company: body });
+    } catch (err) {
+      cardErrorResponse(res, err);
+    }
   });
 
   app.post(`${API_PREFIX}/demo/run`, async (req: Request, res: Response) => {
     try {
       const mode: DemoMode = req.body?.mode === "live" ? "live" : "mock";
       lastMode = mode;
-      const result = await withAgentLock(() => runDemo({ mode }));
-      if (result === null) {
-        res
-          .status(409)
-          .json({ error: "The agent is already running a check or demo; try again shortly." });
-        return;
-      }
+      const result = await lockGuard(() => runDemo({ mode }));
       res.json(result);
     } catch (err) {
       cardErrorResponse(res, err);
     }
   });
 
-  app.post(`${API_PREFIX}/session/reset`, (_req: Request, res: Response) => {
-    saveSubscriptions([]);
-    saveCompany({ name: "", employees: 0, annualBudget: 0 });
-    saveMemory(defaultMemory());
-    saveCards([]);
-    savePackages([]);
-    clearRecording();
-    broadcastSse("session_reset", { cleared: true }, { record: false });
-    broadcastSse("savings_update", computeSavings([]), { record: false });
-    broadcastSse("agent_status", deriveAgentStatus(), { record: false });
-    res.json({ cleared: true, subscriptions: 0, company: null });
+  app.post(`${API_PREFIX}/session/reset`, async (_req: Request, res: Response) => {
+    try {
+      await lockGuard(() => {
+        saveSubscriptions([]);
+        saveCompany({ name: "", employees: 0, annualBudget: 0 });
+        saveMemory(defaultMemory());
+        saveCards([]);
+        savePackages([]);
+        clearRecording();
+        broadcastSse("session_reset", { cleared: true }, { record: false });
+        broadcastSse("savings_update", computeSavings([]), { record: false });
+        broadcastSse("agent_status", deriveAgentStatus(), { record: false });
+        return Promise.resolve();
+      });
+      res.json({ cleared: true, subscriptions: 0, company: null });
+    } catch (err) {
+      cardErrorResponse(res, err);
+    }
   });
 
   app.get(`${API_PREFIX}/autopilot/status`, (_req: Request, res: Response) => {
     res.json(getAutopilotStatus());
   });
 
-  app.post(`${API_PREFIX}/stack/import`, (req: Request, res: Response) => {
+  app.post(`${API_PREFIX}/stack/import`, async (req: Request, res: Response) => {
     const body = req.body;
     if (!Array.isArray(body) || body.length === 0) {
       res.status(400).json({ error: "Expected a non-empty array of subscriptions." });
       return;
     }
-    const subs: Subscription[] = [];
-    const required: Array<keyof Subscription> = ["id", "vendorName", "category", "annualCost"];
-    for (const raw of body) {
-      const item = raw as Record<string, unknown>;
-      for (const key of required) {
-        if (typeof item[key] === "undefined") {
-          res.status(400).json({ error: `Subscription missing required field '${String(key)}'.` });
-          return;
-        }
-      }
-      if (item.billingModel !== "seat_based" && item.billingModel !== "usage_based") {
-        res.status(400).json({ error: `Subscription '${String(item.id)}' has invalid billingModel.` });
-        return;
-      }
-      subs.push({
-        id: String(item.id),
-        vendorName: String(item.vendorName),
-        category: String(item.category),
-        billingModel: item.billingModel as Subscription["billingModel"],
-        status: item.status === "cancelled" || item.status === "switched" ? (item.status as Subscription["status"]) : "active",
-        contractStart: typeof item.contractStart === "string" ? item.contractStart : getDemoDate().toISOString(),
-        contractEnd: typeof item.contractEnd === "string" ? item.contractEnd : getDemoDate().toISOString(),
-        renewalDate: typeof item.renewalDate === "string" ? item.renewalDate : getDemoDate().toISOString(),
-        billingCycle: item.billingCycle === "monthly" ? "monthly" : "annual",
-        annualCost: Number(item.annualCost),
-        currentPeriodCost: Number(item.currentPeriodCost ?? item.annualCost),
-        renewalCost: typeof item.renewalCost === "number" ? (item.renewalCost as number) : null,
-        seatsPurchased: typeof item.seatsPurchased === "number" ? (item.seatsPurchased as number) : null,
-        seatsActive: typeof item.seatsActive === "number" ? (item.seatsActive as number) : null,
-        pricePerSeat: typeof item.pricePerSeat === "number" ? (item.pricePerSeat as number) : null,
-        priceIncreasePct: typeof item.priceIncreasePct === "number" ? (item.priceIncreasePct as number) : null,
-        autoRenew: item.autoRenew !== false,
-        usageMetric: typeof item.usageMetric === "string" ? item.usageMetric : null,
-        notes: typeof item.notes === "string" ? item.notes : "",
-      });
+    const parsed = parseStackImport(body);
+    if (!parsed.ok) {
+      res
+        .status(400)
+        .json({ error: "Stack import rejected: subscription validation failed.", errors: parsed.errors });
+      return;
     }
-    saveSubscriptions(subs);
-    res.json({ status: "ok", imported: subs.length, asOf: getDemoDate().toISOString() });
+    try {
+      const result = await lockGuard(() =>
+        Promise.resolve(applyStackImport(parsed.subs))
+      );
+      res.json(result);
+    } catch (err) {
+      cardErrorResponse(res, err);
+    }
   });
 
-  app.post(`${API_PREFIX}/debug/negotiation/:subscriptionId/accept`, (req: Request, res: Response) => {
-    debugResolveNegotiation(String(req.params.subscriptionId), "accepted", res);
-  });
+  if (DEBUG_ROUTES_ENABLED) {
+    app.post(`${API_PREFIX}/debug/negotiation/:subscriptionId/accept`, async (req: Request, res: Response) => {
+      await lockGuard(() => {
+        debugResolveNegotiation(String(req.params.subscriptionId), "accepted", res);
+        return Promise.resolve();
+      }).catch((err) => cardErrorResponse(res, err));
+    });
 
-  app.post(`${API_PREFIX}/debug/negotiation/:subscriptionId/reject`, (req: Request, res: Response) => {
-    debugResolveNegotiation(String(req.params.subscriptionId), "rejected", res);
-  });
+    app.post(`${API_PREFIX}/debug/negotiation/:subscriptionId/reject`, async (req: Request, res: Response) => {
+      await lockGuard(() => {
+        debugResolveNegotiation(String(req.params.subscriptionId), "rejected", res);
+        return Promise.resolve();
+      }).catch((err) => cardErrorResponse(res, err));
+    });
+  }
 
   return app;
+}
+
+// ---------------------------------------------------------------------------
+// Stack import: an atomic session replacement with strict runtime validation.
+// ---------------------------------------------------------------------------
+
+interface ImportFieldError {
+  path: string;
+  message: string;
+}
+
+type ParsedImport =
+  | { ok: true; subs: Subscription[] }
+  | { ok: false; errors: ImportFieldError[] };
+
+type ImportRaw = Record<string, unknown>;
+
+const REQUIRED_STRING_FIELDS: Array<[keyof Subscription, string]> = [
+  ["id", "id"],
+  ["vendorName", "vendorName"],
+  ["category", "category"],
+];
+
+const OPTIONAL_MONEY_FIELDS: Array<[keyof Subscription, string]> = [
+  ["renewalCost", "renewalCost"],
+  ["seatsPurchased", "seatsPurchased"],
+  ["seatsActive", "seatsActive"],
+  ["pricePerSeat", "pricePerSeat"],
+  ["priceIncreasePct", "priceIncreasePct"],
+];
+
+const OPTIONAL_DATE_FIELDS: Array<[keyof Subscription, string]> = [
+  ["contractStart", "contractStart"],
+  ["contractEnd", "contractEnd"],
+  ["renewalDate", "renewalDate"],
+];
+
+function parseMoney(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return !Number.isNaN(parsed) && Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function validateElement(raw: unknown, index: number, errors: ImportFieldError[]): ImportRaw | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    errors.push({ path: `[${index}]`, message: `element ${index} must be a plain object (got ${raw === null ? "null" : Array.isArray(raw) ? "array" : typeof raw}).` });
+    return null;
+  }
+  return raw as ImportRaw;
+}
+
+function validateOptionalNumberField(
+  item: ImportRaw,
+  field: keyof Subscription,
+  label: string,
+  index: number,
+  errors: ImportFieldError[]
+): void {
+  if (!(field in item)) return;
+  const value = item[field];
+  if (value === null) return;
+  const parsed = typeof value === "number" ? value : parseMoney(value);
+  if (parsed === null || parsed < 0) {
+    errors.push({ path: `[${index}].${label}`, message: `${label} for element ${index} must be a finite, non-negative number.` });
+  }
+}
+
+function validateOptionalDateField(
+  item: ImportRaw,
+  field: keyof Subscription,
+  label: string,
+  index: number,
+  errors: ImportFieldError[]
+): void {
+  if (!(field in item)) return;
+  const value = item[field];
+  if (typeof value !== "string") {
+    errors.push({ path: `[${index}].${label}`, message: `${label} for element ${index} must be an ISO date string.` });
+    return;
+  }
+  if (Number.isNaN(new Date(value).getTime())) {
+    errors.push({ path: `[${index}].${label}`, message: `${label} for element ${index} is not a valid date.` });
+  }
+}
+
+// Validate every imported element and field against a runtime schema BEFORE any
+// conversion, subscription construction, or persistence. Required string fields
+// must be non-empty; monetary and seat fields must be finite and non-negative;
+// optional dates must parse; identifiers must be unique. Every violation is
+// returned as a field-specific error and the whole import is rejected with 400.
+export function parseStackImport(body: unknown[]): ParsedImport {
+  const errors: ImportFieldError[] = [];
+  const seenIds = new Set<string>();
+  const subs: Subscription[] = [];
+  const nowIso = getDemoDate().toISOString();
+
+  body.forEach((raw, index) => {
+    const item = validateElement(raw, index, errors);
+    if (!item) return;
+
+    for (const [key, label] of REQUIRED_STRING_FIELDS) {
+      const value = item[key];
+      if (typeof value !== "string" || value.trim() === "") {
+        errors.push({ path: `[${index}].${label}`, message: `${label} is required for element ${index} and must be a non-empty string.` });
+      }
+    }
+    const id = typeof item.id === "string" ? item.id : "";
+    if (id && seenIds.has(id)) {
+      errors.push({ path: `[${index}].id`, message: `duplicate subscription id '${id}' (already used at index ${[...seenIds].indexOf(id)}).` });
+    }
+    if (id) seenIds.add(id);
+
+    if ("annualCost" in item) {
+      const value = parseMoney(item.annualCost);
+      if (value === null || value < 0) {
+        errors.push({ path: `[${index}].annualCost`, message: `annualCost for element ${index} must be a finite, non-negative number.` });
+      }
+    } else {
+      errors.push({ path: `[${index}].annualCost`, message: `annualCost is required for element ${index}.` });
+    }
+    if ("currentPeriodCost" in item) {
+      const value = parseMoney(item.currentPeriodCost);
+      if (value === null || value < 0) {
+        errors.push({ path: `[${index}].currentPeriodCost`, message: `currentPeriodCost for element ${index} must be a finite, non-negative number.` });
+      }
+    }
+
+    if ("billingModel" in item && item.billingModel !== "seat_based" && item.billingModel !== "usage_based") {
+      errors.push({ path: `[${index}].billingModel`, message: `billingModel for element ${index} must be 'seat_based' or 'usage_based'.` });
+    }
+    if ("status" in item && item.status !== "active" && item.status !== "cancelled" && item.status !== "switched") {
+      errors.push({ path: `[${index}].status`, message: `status for element ${index} must be 'active', 'cancelled', or 'switched'.` });
+    }
+    if ("billingCycle" in item && item.billingCycle !== "monthly" && item.billingCycle !== "annual") {
+      errors.push({ path: `[${index}].billingCycle`, message: `billingCycle for element ${index} must be 'monthly' or 'annual'.` });
+    }
+    if ("autoRenew" in item && typeof item.autoRenew !== "boolean") {
+      errors.push({ path: `[${index}].autoRenew`, message: `autoRenew for element ${index} must be a boolean.` });
+    }
+    if ("usageMetric" in item && item.usageMetric !== null && typeof item.usageMetric !== "string") {
+      errors.push({ path: `[${index}].usageMetric`, message: `usageMetric for element ${index} must be a string or null.` });
+    }
+    if ("notes" in item && typeof item.notes !== "string") {
+      errors.push({ path: `[${index}].notes`, message: `notes for element ${index} must be a string.` });
+    }
+    for (const [key, label] of OPTIONAL_MONEY_FIELDS) {
+      validateOptionalNumberField(item, key, label, index, errors);
+    }
+    for (const [key, label] of OPTIONAL_DATE_FIELDS) {
+      validateOptionalDateField(item, key, label, index, errors);
+    }
+
+    if (errors.length > 0 && errors.some((e) => e.path.startsWith(`[${index}]`))) {
+      return;
+    }
+
+    const billingModel = item.billingModel === "usage_based" ? "usage_based" : "seat_based";
+    const status = item.status === "cancelled" || item.status === "switched" ? (item.status as Subscription["status"]) : "active";
+    const billingCycle = item.billingCycle === "monthly" ? "monthly" : "annual";
+    const annualCost = parseMoney(item.annualCost) ?? 0;
+    const currentPeriodCost = parseMoney(item.currentPeriodCost) ?? annualCost;
+
+    subs.push({
+      id: String(item.id),
+      vendorName: String(item.vendorName),
+      category: String(item.category),
+      billingModel,
+      status,
+      contractStart: typeof item.contractStart === "string" ? (item.contractStart as string) : nowIso,
+      contractEnd: typeof item.contractEnd === "string" ? (item.contractEnd as string) : nowIso,
+      renewalDate: typeof item.renewalDate === "string" ? (item.renewalDate as string) : nowIso,
+      billingCycle,
+      annualCost,
+      currentPeriodCost,
+      renewalCost: typeof item.renewalCost === "number" ? (item.renewalCost as number) : null,
+      seatsPurchased: typeof item.seatsPurchased === "number" ? (item.seatsPurchased as number) : null,
+      seatsActive: typeof item.seatsActive === "number" ? (item.seatsActive as number) : null,
+      pricePerSeat: typeof item.pricePerSeat === "number" ? (item.pricePerSeat as number) : null,
+      priceIncreasePct: typeof item.priceIncreasePct === "number" ? (item.priceIncreasePct as number) : null,
+      autoRenew: item.autoRenew !== false,
+      usageMetric: typeof item.usageMetric === "string" ? (item.usageMetric as string) : null,
+      notes: typeof item.notes === "string" ? (item.notes as string) : "",
+    });
+  });
+
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+  return { ok: true, subs };
+}
+
+function applyStackImport(subs: Subscription[]): { status: string; imported: number; asOf: string } {
+  // A stack import replaces the procurement session wholesale: the subscriptions
+  // AND every artifact derived from the previous stack (decision packages, cards,
+  // memory, savings, and the demo recording) are cleared atomically so nothing
+  // from the old stack leaks into Guardian or negotiation decisions.
+  saveSubscriptions(subs);
+  saveCards([]);
+  savePackages([]);
+  saveMemory(defaultMemory());
+  clearRecording();
+  broadcastSse("savings_update", computeSavings([]), { record: false });
+  broadcastSse("agent_status", deriveAgentStatus(), { record: false });
+  return { status: "ok", imported: subs.length, asOf: getDemoDate().toISOString() };
 }
 
 function debugResolveNegotiation(subscriptionId: string, resolution: "accepted" | "rejected", res: Response): void {
@@ -296,14 +547,6 @@ function debugResolveNegotiation(subscriptionId: string, resolution: "accepted" 
     buyerOfferPrice: negotiation.buyerOfferPrice,
     proposedAcceptPrice: negotiation.proposedAcceptPrice,
   });
-  broadcastSse("decision_card", {
-    cardId: card.id,
-    subscriptionId: card.subscriptionId,
-    action: card.action,
-    status: card.status,
-    estimatedSavings: card.estimatedSavings,
-    realizedSavings: card.realizedSavings,
-    summary: card.summary,
-  });
-  res.json({ card });
+  broadcastSse("agent_status", deriveAgentStatus());
+  res.json({ status: "ok", resolution, subscriptionId });
 }
