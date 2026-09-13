@@ -92,37 +92,41 @@ See `AGENTS.md` for build levels.
 
 > AWS prereqs (live mode only): credentials with Bedrock access (Sonnet 4.6, `us-east-1`). The deterministic demo runs fully offline with `DEMO_MODE=true`. One-time account setup (budget alert, least-privilege IAM) is in `docs/07-build-plan.md` → "AWS Cost Guardrails".
 
-#### Deploying to AWS (ECS Fargate — primary)
+#### Deploying to AWS (EC2 t3.micro — verified)
 
-Real Bedrock live mode is the only thing standing between the local demo and the
-deployed service. The wiring is one-time; the `infra/` directory is the runbook.
+One always-on EC2 t3.micro (free tier) runs the whole app: a Node process serves
+both the API and the built UI. The full runbook is `docs/09-deployment.md` and the
+instance bootstrap is `infra/ec2-user-data.sh` (clone → `npm ci` → generate a demo
+token → rebuild the SPA with it baked in → systemd unit). Launch steps:
+
+1. EC2 console → Launch instance → **Amazon Linux 2023**, **t3.micro**.
+2. Security group: SSH (22) from your IP + **Custom TCP (3000) from `0.0.0.0/0`**.
+3. Advanced details → User data → paste `infra/ec2-user-data.sh`.
+4. Allocate an **Elastic IP**, attach it, and the judge URL is `http://<IP>:3000/`.
+
+The demo token is generated at boot (`sudo cat /root/savr-token.txt`) and baked
+into the served SPA, so the public UI can click Run/Approve while state-changing
+API routes stay bearer-gated.
 
 > Public SPA note: once `HOST=0.0.0.0`, every state-changing `/api` POST needs
-> `Authorization: Bearer $API_TOKEN`, and the browser has to present it. Bake the
-> same token the server expects into the served UI bundle with
-> `docker build --build-arg VITE_API_TOKEN=<token>` (see step 2). The committed
-> `ui/dist` stays token-free for local development.
+> `Authorization: Bearer $API_TOKEN`, and the browser has to present it. The token
+> is baked into the served bundle at boot; the committed `ui/dist` stays token-free
+> for local development.
 
-**0 — Enable the model (console, one time).** In the Bedrock console (us-east-1) →
-Model access → request access for `Anthropic Claude Sonnet 4.6`
-(`anthropic.claude-sonnet-4-6`). This is separate from IAM and the failure mode if
-you get `model access is blocked` on the first live call.
+**Live Bedrock on the public instance (optional):** the demo above runs
+deterministically offline (zero Bedrock cost). To also exercise the real model, do
+the one-time IAM grant in `docs/09-deployment.md` §0 (a least-privilege
+`bedrock:InvokeModel*` inline policy for `anthropic.claude-sonnet-4-6`) and switch
+the instance to `DEMO_MODE=false` — the Guardian/Negotiator loop then runs on real
+Claude Sonnet 4.6 over the same Strands orchestration.
 
-**1 — Grant the dev/deploy identity Bedrock (the current gap).** The live probe
-`RUN_LIVE_AKS=true npm run validate:l4.5` fails today with
-`User: .../savr-dev is not authorized to perform bedrock:InvokeModelWithResponseStream`.
-Attach the least-privilege policy (Bedrock invoke + ECR push + deploy rights):
+#### Deploying to AWS — ECS Fargate (alternative, containers)
 
-```bash
-aws iam put-user-policy --user-name savr-dev \
-  --policy-name savr-agent-deploy \
-  --policy-document file://infra/bedrock-iam-policy.json
-```
-
-**2 — Build, tag, push the image.** Generate one demo token, use it for both the
-UI bundle and the server secret:
+Container path: same IAM grant, then ECR image + one CloudFormation stack (ALB +
+Fargate service + roles). Full runbook in `infra/`.
 
 ```bash
+# 1. Build, tag, push the image (token baked into the bundle)
 DEMO_TOKEN="$(openssl rand -hex 24)"
 aws ecr create-repository --repository-name savr || true
 aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin \
@@ -130,21 +134,13 @@ aws ecr get-login-password --region us-east-1 | docker login --username AWS --pa
 docker build -f infra/Dockerfile --build-arg VITE_API_TOKEN="$DEMO_TOKEN" -t savr:latest .
 docker tag savr:latest <ACCOUNT>.dkr.ecr.us-east-1.amazonaws.com/savr:latest
 docker push <ACCOUNT>.dkr.ecr.us-east-1.amazonaws.com/savr:latest
-```
 
-**3 — API token secret (the request gate).** Store the *same* token so the task
-role can fetch it (never a literal env var):
-
-```bash
+# 2. API token secret (the request gate; the task role fetches it)
 aws secretsmanager create-secret --name savr/api-token \
   --secret-string "{\"API_TOKEN\":\"$DEMO_TOKEN\"}"
-```
 
-**4 — Deploy the stack** (ECS Fargate service + ALB + roles), then hit the URL:
-
-```bash
-aws cloudformation create-stack \
-  --stack-name savr \
+# 3. Deploy the stack, then hit the URL from the Outputs (AppUrl)
+aws cloudformation create-stack --stack-name savr \
   --template-body file://infra/cloudformation/deploy.yaml \
   --parameters \
     ParameterKey=ImageUri,ParameterValue=<ACCOUNT>.dkr.ecr.us-east-1.amazonaws.com/savr:latest \
@@ -152,25 +148,15 @@ aws cloudformation create-stack \
     ParameterKey=SubnetA,ParameterValue=subnet-<a> \
     ParameterKey=SubnetB,ParameterValue=subnet-<b> \
     ParameterKey=ApiTokenSecretArn,ParameterValue=arn:aws:secretsmanager:us-east-1:<ACCOUNT>:secret:savr/api-token-<suffix> \
-    ParameterKey=DemoMode,ParameterValue=false \
+    ParameterKey=DemoMode,ParameterValue=true \
   --capabilities CAPABILITY_IAM
-# URL is in the stack Outputs (AppUrl). Verify: curl <AppUrl>/health and open the SPA.
 ```
 
-**5 — Autonomous trigger.** For the "runs on its own" story in production set
-`AutopilotEnabled=true` on the stack (Guardian loops in the running service). If you
-ever want the trigger entirely in AWS infrastructure, point an EventBridge schedule
-at an `ecs run-task` of the same `savr` task family — the in-process loop is what the
-demo uses and is sufficient.
-
-**Cost & teardown:** one Fargate task (0.5 vCPU / 1 GB) ≈ $20–25/mo + Bedrock token
-costs (guard with the budget alert). Remove with
+In-process autopilot (`AutopilotEnabled=true`) or an EventBridge schedule aimed at
+an `ecs run-task` can trigger the Guardian "runs on its own" story. Cost ≈ $20–25/mo
+per task + Bedrock tokens; remove with
 `aws cloudformation delete-stack --stack-name savr`.
 
-**Fallback — single EC2 t3.micro (free tier, no containers):** same IAM policy, then
-clone the repo and run one Node process (`docs/09-deployment.md` has the full
-user-data + systemd unit). It also rebuilds the SPA with
-`VITE_API_TOKEN="$TOKEN" npx vite build` so the public demo can click Run/Approve.
 If a deploy attempt eats time, the app runs identically locally with
 `DEMO_MODE=true`; deployment is a stretch bonus, never a blocker for the demo.
 
