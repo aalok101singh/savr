@@ -177,7 +177,9 @@ immediately. The demo itself (`DEMO_MODE=true`) runs without any AWS credentials
 deterministic build as below, demo token baked into the served UI). Ephemeral —
 see the stop/cleanup note in `docs/07-build-plan.md`.
 
-**Video:** TODO — record a ≤5-min demo (script and timings in `tasks/L5-demo-submission.md`). The UI's **Replay** button replays the canonical run at narrative pacing for recording.
+**Video (unlisted, ~3:30):** https://www.youtube.com/watch?v=6kZa1fRCWls — the
+canonical walkthrough (script and timings in `tasks/L5-demo-submission.md`). The UI's
+**Replay** button replays the canonical run at narrative pacing.
 
 **Flow:** Reset → Run → Guardian flags Notion NEGOTIATE + Loom/Veed SWITCH → "2 actions need your approval" → Approve Notion (the Negotiator then engages the vendor: 3 rounds $10,800→$10,200→$9,840) → Approve Loom → Savings counter: **$5,760/yr** → "All actions resolved."
 
