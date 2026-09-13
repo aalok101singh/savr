@@ -2,9 +2,18 @@
 
 Goal: (1) unblock the live Bedrock path with a least-privilege IAM policy, and (2)
 run the full API + built UI (`ui/dist`) on one always-on AWS instance serving a
-public URL for the demo-day submission. The API and UI are served by a **single
-Node process** (`npm run dev` / `tsx src/api/server.ts`) — the Express app in
-`src/api/server.ts` already serves `ui/dist` when `ui/dist/index.html` exists.
+public URL for the demo-day submission.
+
+**Primary path:** ECS Fargate (ALB + SecretsManager + ECR image) — the `infra/`
+dire
+itory is the runbook and `README.md` → "Deploying to AWS (ECS Fargate)" has the
+exact commands. **This document is the zero-container fallback** (one EC2
+t3.micro running the Node process directly) plus the shared IAM + security-gate
+details.
+
+The API and UI are served by a **single Node process** — the Express app in
+`src/api/server.ts` already serves `ui/dist` when `ui/dist/index.html` exists, so
+on EC2 no web server beyond it is needed.
 
 ## 0. IAM — unblock live Bedrock
 
@@ -12,7 +21,10 @@ Node process** (`npm run dev` / `tsx src/api/server.ts`) — the Express app in
 reason live runs fall back to the local deterministic model (DECISIONS #038).
 
 Attach this least-privilege policy **as a standalone inline/JSON policy** to the
-`savr-dev` IAM user (it is scoped to a single foundation model in a single region):
+`savr-dev` IAM user (it is scoped to a single foundation model in a single region).
+The ECS path uses the fuller `infra/bedrock-iam-policy.json` (Bedrock invoke +
+ECR + CloudFormation/ECS deploy rights); the snippet below is the Bedrock-only
+piece common to both paths:
 
 ```json
 {

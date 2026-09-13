@@ -10,13 +10,19 @@
 # paths to a non-existent dist/data). Full `npm ci` keeps tsx available.
 
 # ---- stage 1: build the UI -----------------------------------------------
+# VITE_API_TOKEN is baked into the bundle so the public SPA can present the bearer
+# token on every state-changing /api POST (the API rejects those without it once
+# HOST=0.0.0.0). Pass it at build time: docker build --build-arg VITE_API_TOKEN=<t>.
+# Local builds without the arg produce the token-free bundle, exactly like
+# `npm run build:ui` locally.
 FROM node:22-slim AS ui-builder
 WORKDIR /app/ui
+ARG VITE_API_TOKEN=
 ENV CI=true
 COPY ui/package.json ui/package-lock.json* ./
 RUN npm ci
 COPY ui .
-RUN npm run build
+RUN VITE_API_TOKEN="$VITE_API_TOKEN" npm run build
 
 # ---- stage 2: runtime -----------------------------------------------------
 FROM node:22-slim AS runtime
