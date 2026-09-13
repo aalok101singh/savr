@@ -92,6 +92,74 @@ See `AGENTS.md` for build levels.
 
 > AWS prereqs (live mode only): credentials with Bedrock access (Sonnet 4.6, `us-east-1`). The deterministic demo runs fully offline with `DEMO_MODE=true`. One-time account setup (budget alert, least-privilege IAM) is in `docs/07-build-plan.md` → "AWS Cost Guardrails".
 
+#### Deploying to AWS (EC2 t3.micro — verified)
+
+One always-on EC2 t3.micro (free tier) runs the whole app: a Node process serves
+both the API and the built UI. The full runbook is `docs/09-deployment.md` and the
+instance bootstrap is `infra/ec2-user-data.sh` (clone → `npm ci` → generate a demo
+token → rebuild the SPA with it baked in → systemd unit). Launch steps:
+
+1. EC2 console → Launch instance → **Amazon Linux 2023**, **t3.micro**.
+2. Security group: SSH (22) from your IP + **Custom TCP (3000) from `0.0.0.0/0`**.
+3. Advanced details → User data → paste `infra/ec2-user-data.sh`.
+4. Allocate an **Elastic IP**, attach it, and the judge URL is `http://<IP>:3000/`.
+
+The demo token is generated at boot (`sudo cat /root/savr-token.txt`) and baked
+into the served SPA, so the public UI can click Run/Approve while state-changing
+API routes stay bearer-gated.
+
+> Public SPA note: once `HOST=0.0.0.0`, every state-changing `/api` POST needs
+> `Authorization: Bearer $API_TOKEN`, and the browser has to present it. The token
+> is baked into the served bundle at boot; the committed `ui/dist` stays token-free
+> for local development.
+
+**Live Bedrock on the public instance (optional):** the demo above runs
+deterministically offline (zero Bedrock cost). To also exercise the real model, do
+the one-time IAM grant in `docs/09-deployment.md` §0 (a least-privilege
+`bedrock:InvokeModel*` inline policy for `anthropic.claude-sonnet-4-6`) and switch
+the instance to `DEMO_MODE=false` — the Guardian/Negotiator loop then runs on real
+Claude Sonnet 4.6 over the same Strands orchestration.
+
+#### Deploying to AWS — ECS Fargate (alternative, containers)
+
+Container path: same IAM grant, then ECR image + one CloudFormation stack (ALB +
+Fargate service + roles). Full runbook in `infra/`.
+
+```bash
+# 1. Build, tag, push the image (token baked into the bundle)
+DEMO_TOKEN="$(openssl rand -hex 24)"
+aws ecr create-repository --repository-name savr || true
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin \
+  <ACCOUNT>.dkr.ecr.us-east-1.amazonaws.com
+docker build -f infra/Dockerfile --build-arg VITE_API_TOKEN="$DEMO_TOKEN" -t savr:latest .
+docker tag savr:latest <ACCOUNT>.dkr.ecr.us-east-1.amazonaws.com/savr:latest
+docker push <ACCOUNT>.dkr.ecr.us-east-1.amazonaws.com/savr:latest
+
+# 2. API token secret (the request gate; the task role fetches it)
+aws secretsmanager create-secret --name savr/api-token \
+  --secret-string "{\"API_TOKEN\":\"$DEMO_TOKEN\"}"
+
+# 3. Deploy the stack, then hit the URL from the Outputs (AppUrl)
+aws cloudformation create-stack --stack-name savr \
+  --template-body file://infra/cloudformation/deploy.yaml \
+  --parameters \
+    ParameterKey=ImageUri,ParameterValue=<ACCOUNT>.dkr.ecr.us-east-1.amazonaws.com/savr:latest \
+    ParameterKey=VpcId,ParameterValue=vpc-<default-vpc> \
+    ParameterKey=SubnetA,ParameterValue=subnet-<a> \
+    ParameterKey=SubnetB,ParameterValue=subnet-<b> \
+    ParameterKey=ApiTokenSecretArn,ParameterValue=arn:aws:secretsmanager:us-east-1:<ACCOUNT>:secret:savr/api-token-<suffix> \
+    ParameterKey=DemoMode,ParameterValue=true \
+  --capabilities CAPABILITY_IAM
+```
+
+In-process autopilot (`AutopilotEnabled=true`) or an EventBridge schedule aimed at
+an `ecs run-task` can trigger the Guardian "runs on its own" story. Cost ≈ $20–25/mo
+per task + Bedrock tokens; remove with
+`aws cloudformation delete-stack --stack-name savr`.
+
+If a deploy attempt eats time, the app runs identically locally with
+`DEMO_MODE=true`; deployment is a stretch bonus, never a blocker for the demo.
+
 ## Security
 
 `.env` is gitignored and never committed. Copy `.env.example` → `.env` and fill in real
@@ -102,7 +170,7 @@ immediately. The demo itself (`DEMO_MODE=true`) runs without any AWS credentials
 
 **Video:** TODO — record a ≤5-min demo (script and timings in `tasks/L5-demo-submission.md`). The UI's **Replay** button replays the canonical run at narrative pacing for recording.
 
-**Flow:** Reset → Run → Guardian flags Notion NEGOTIATE + Loom/Veed SWITCH → "2 actions need your approval" → Approve both → Savings counter: **$5,760/yr** → "All actions resolved."
+**Flow:** Reset → Run → Guardian flags Notion NEGOTIATE + Loom/Veed SWITCH → "2 actions need your approval" → Approve Notion (the Negotiator then engages the vendor: 3 rounds $10,800→$10,200→$9,840) → Approve Loom → Savings counter: **$5,760/yr** → "All actions resolved."
 
 For the "runs on its own" shot: `AUTOPILOT_ENABLED=true AUTOPILOT_INTERVAL_MS=45000 npm run dev`, then watch Guardian flag a renewal unprompted.
 

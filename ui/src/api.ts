@@ -1,3 +1,9 @@
+// Build-time bearer token for state-changing routes. Only set for a public demo
+// deployment (VITE_API_TOKEN at build time); local development leaves it empty so
+// the API's loopback binding is the only protection needed. Optional-chaining keeps
+// `import.meta.env` safe when this module runs under tsx (ui/scripts checkers).
+const AUTH_TOKEN: string = import.meta.env?.VITE_API_TOKEN ?? "";
+
 export async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(path);
   if (!res.ok) {
@@ -7,7 +13,11 @@ export async function getJson<T>(path: string): Promise<T> {
 }
 
 export async function postJson<T>(path: string, body?: unknown): Promise<T> {
-  const init: RequestInit = { method: "POST", headers: { "Content-Type": "application/json" } };
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (AUTH_TOKEN) {
+    headers["Authorization"] = `Bearer ${AUTH_TOKEN}`;
+  }
+  const init: RequestInit = { method: "POST", headers };
   if (body !== undefined) {
     init.body = JSON.stringify(body);
   }
