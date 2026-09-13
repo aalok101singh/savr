@@ -1,0 +1,57 @@
+flowchart LR
+  subgraph UI["Browser — React + Vite SPA (ui/)"]
+    DASH["Dashboard<br/>onboarding · stack · decision cards · savings"]
+    SSE["SSE listener<br/>/api/events · guardian_progress · recording"]
+  end
+
+  subgraph API["Node process — Express API (src/api/)"]
+    ROUTES["REST routes<br/>run · reset · import · decisions · approve"]
+    DEMO["runDemo orchestrator<br/>per-run mode: mock | live"]
+    APPROVE["post-approval<br/>negotiation runs only after approval"]
+    AUTOPILOT["autopilot loop<br/>opt-in · 120s interval"]
+    AUTH["security<br/>API_TOKEN bearer gate · HOST=127.0.0.1"]
+    ROCK["withAgentLock · run state"]
+  end
+
+  subgraph STR["Strands Agents SDK 1.14 — the orchestrator (src/agent/)"]
+    GUARD["Guardian Agent<br/>GuardianOutputSchema · ≤12 tool calls"]
+    NEGO["Negotiator Agent<br/>NegotiationOutputSchema · ≤5 rounds"]
+    TOOLS["Tools<br/>check-renewals · benchmark-pricing · search-alternatives · check-policy · send-negotiation-message · parse-vendor-response"]
+    HOOKS["Hook<br/>policy-guardrail (beforeToolCall)"]
+    MODEL["Model seam<br/>LocalModel (deterministic) · BedrockModel (live)"]
+  end
+
+  subgraph SIM["Simulated external — honesty seam"]
+    VENDOR["Vendor Sandbox<br/>Express :3001 · message / counter / accept contract"]
+  end
+
+  BEDROCK["Amazon Bedrock<br/>anthropic.claude-sonnet-4-6"]
+  WEB["9Router web evidence<br/>(optional live pricing)"]
+
+  subgraph PERS["Persistence — data/ (local JSON)"]
+    STORE["Store<br/>subscriptions · cards · memory · company · policy · cached-evidence"]
+  end
+  DDB["DynamoDB — production intent (not built)"]
+
+  DASH -->|"POST /api/* (Bearer)"| ROUTES
+  ROUTES <--> DEMO
+  ROUTES --> APPROVE
+  AUTOPILOT --> DEMO
+  DEMO --> ROCK
+  DEMO -->|runGuardian| GUARD
+  GUARD --> TOOLS
+  HOOKS -.->|enforces| TOOLS
+  GUARD --> MODEL
+  DEMO -->|"SSE events"| SSE
+  SSE --> DASH
+  GUARD -->|"DecisionPackage[] + pending cards"| DEMO
+  GUARD -->|"autonomous KEEP / DOWNGRADE / CANCEL"| STORE
+  APPROVE -->|approved card only| NEGO
+  NEGO -->|"send / parse"| TOOLS
+  NEGO <-->|"offers · counters"| VENDOR
+  NEGO --> MODEL
+  NEGO -->|accepted resolution| STORE
+  MODEL -.->|live| BEDROCK
+  MODEL -.->|optional live research| WEB
+  DEMO -->|read| STORE
+  STORE -.->|production intent| DDB

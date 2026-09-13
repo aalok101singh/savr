@@ -1,0 +1,35 @@
+sequenceDiagram
+  autonumber
+  actor U as User
+  participant SPA as React SPA
+  participant API as Express API
+  participant SDK as Strands SDK
+  participant V as Vendor Sandbox
+  participant ST as JSON Store
+  participant B as Bedrock model (live)
+  participant E as SSE channel
+
+  U->>SPA: Open dashboard — 14 subscriptions · $47,400/yr
+  SPA->>API: POST /api/demo/run { mode }
+  API->>SDK: runGuardian (candidate set · triggers)
+  SDK->>ST: Read policy + cached evidence
+  SDK->>B: Reason via Bedrock (live mode only)
+  SDK->>SDK: Validate GuardianOutputSchema
+  SDK-->>API: Decision packages
+  API->>ST: Persist decision cards
+  API->>E: Emit guardian_progress
+  E-->>SPA: Stream events
+  SPA-->>U: Cards — Notion NEGOTIATE · Loom SWITCH
+  U->>SPA: Approve NEGOTIATE card
+  Note over API,SDK: Human gate — nothing contacts a vendor until approval
+  SPA->>API: POST /api/decisions/:id/approve
+  API->>SDK: runNegotiation (approved card only)
+  loop ≤ 5 rounds
+    SDK->>V: propose offer
+    V-->>SDK: counter offer
+  end
+  SDK->>ST: Persist accepted negotiation
+  API->>ST: Apply mutation — renewal $9,840
+  API->>E: Emit resolved state
+  E-->>SPA: Stream events
+  SPA-->>U: Savings → $5,760/yr

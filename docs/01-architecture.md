@@ -235,3 +235,42 @@ function executeAction(card: DecisionCard, subscription: Subscription): PostAppr
 - **Persistence:** Local JSON (`data/*.json`). DynamoDB is the production intent, not
   implemented in the submission.
 - **Cost guardrails:** `DEMO_MODE=true` is the default (cached evidence, local memory). Autopilot is opt-in (`AUTOPILOT_ENABLED=true`) so a dev server never makes unsolicited Bedrock calls. `SAVR_MODEL` env overrides the model for dev loops; the demo pins Sonnet 4.6. See `docs/07-build-plan.md` → "AWS Cost Guardrails".
+
+## As-Built Component Map
+
+![Savr as-built component map](architecture.svg)
+
+(The same diagram exists as a PNG at `architecture.png`; the editable Mermaid source
+is `architecture.mmd`.)
+
+Ownership boundaries, top to bottom:
+
+- **Browser** — React + Vite SPA (`ui/`): dashboard, onboarding screens, and an SSE
+  listener that streams Guardian progress and the recorded event narrative.
+- **Express API** (`src/api/`) — REST routes, the `runDemo` orchestrator (mode is a
+  per-run parameter, `mock | live`), post-approval (negotiation triggered only by an
+  approved card), the opt-in autopilot clock, and the bearer-token gate that every
+  state-changing route requires when `API_TOKEN` is set.
+- **Strands Agents SDK 1.14 — the orchestrator** (`src/agent/`) — one Agent with two
+  modes (Guardian/Negotiator); six tools; the `beforeToolCall` policy guardrail hook;
+  structured output (`GuardianOutputSchema`/`NegotiationOutputSchema`); and the model
+  seam (`LocalModel` for deterministic mock runs, `BedrockModel` for live).
+- **Honesty seams (dashed)** — the **Vendor Sandbox** (Express :3001) simulates the
+  vendor's counter/accept contract; **Amazon Bedrock** (`anthropic.claude-sonnet-4-6`)
+  and the optional 9Router live research path are live-mode additions; **DynamoDB**
+  is marked production intent, not built.
+- **Persistence** — `data/*.json` (subscriptions, cards, memory, company, policy,
+  cached evidence).
+
+## Runtime Sequence
+
+![Savr runtime sequence](architecture-sequence.svg)
+
+(Editable Mermaid source: `architecture-sequence.mmd`.)
+
+The happy path end-to-end: a user starts the review, the Guardian reads policy and
+cached evidence and emits validated decision packages, the two approval-required cards
+are held for the human (nothing contacts a vendor before approval), approving a card is
+what authorizes the Negotiator, the sandbox plays the vendor across a bounded number of
+rounds, and the accepted resolution is persisted and streamed back — ending at the
+asserted **$5,760/yr** in annual savings.
