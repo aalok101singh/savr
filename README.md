@@ -28,6 +28,11 @@ See `docs/01-architecture.md`.
 
 ![Architecture Diagram](docs/architecture.png)
 
+![Runtime Sequence](docs/architecture-sequence.svg)
+
+Diagram sources (editable Mermaid): [`docs/architecture.mmd`](docs/architecture.mmd) ·
+[`docs/architecture-sequence.mmd`](docs/architecture-sequence.mmd).
+
 Core loop: **Observe → Reason → Propose → Policy Check → Execute or Human Gate → Persist**
 
 The LLM decides what to do. Code decides what it is allowed to do. Human decides what requires human authority.
